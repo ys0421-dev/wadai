@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../../app/app_theme.dart';
 import '../../data/topic_catalog.dart';
 import '../../models/topic.dart';
 import '../../state/wadee_controller.dart';
@@ -59,7 +61,7 @@ class _TopicFormScreenState extends State<TopicFormScreen> {
           Text(
             'あとで会話に使いやすいように、思い出せるメモも残しておきましょう。',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: const Color(0xFF765F55),
+              color: appSecondaryTextColor,
               height: 1.45,
             ),
           ),

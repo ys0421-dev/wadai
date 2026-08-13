@@ -35,9 +35,9 @@ class TopicTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 10),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(16),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(17, 14, 8, 14),
+          padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
           child: Row(
             children: [
               Expanded(
@@ -64,7 +64,7 @@ class TopicTile extends StatelessWidget {
                         Text(
                           categoryName,
                           style: const TextStyle(
-                            color: Color(0xFF856E64),
+                            color: appSecondaryTextColor,
                             fontSize: 13,
                           ),
                         ),
@@ -81,7 +81,7 @@ class TopicTile extends StatelessWidget {
                   tooltip: isFavorite ? 'お気に入りを解除' : 'お気に入りに追加',
                   icon: Icon(
                     isFavorite ? Icons.favorite : Icons.favorite_border,
-                    color: isFavorite ? brandColor : const Color(0xFFB39B90),
+                    color: isFavorite ? brandColor : appSecondaryTextColor,
                   ),
                 ),
               if (onEdit != null || onArchive != null)
@@ -101,7 +101,7 @@ class TopicTile extends StatelessWidget {
                       ),
                   ],
                 ),
-              const Icon(Icons.chevron_right, color: Color(0xFFB39B90)),
+              const Icon(Icons.chevron_right, color: appSecondaryTextColor),
             ],
           ),
         ),
@@ -117,13 +117,13 @@ class _SmallLabel extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
     decoration: BoxDecoration(
-      color: const Color(0xFFF4E8E2),
-      borderRadius: BorderRadius.circular(5),
+      color: appSubtleColor,
+      borderRadius: BorderRadius.circular(8),
     ),
     child: Text(
       text,
       style: const TextStyle(
-        color: Color(0xFF856E64),
+        color: appSecondaryTextColor,
         fontSize: 11,
         fontWeight: FontWeight.w700,
       ),

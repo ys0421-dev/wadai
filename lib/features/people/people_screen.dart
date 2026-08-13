@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shared/widgets/empty_state.dart';
+import '../../shared/widgets/initial_avatar.dart';
 import '../../state/wadee_controller.dart';
 import 'person_detail_screen.dart';
 import 'person_form_screen.dart';
@@ -29,15 +30,12 @@ class _PeopleScreenState extends State<PeopleScreen> {
     animation: widget.store,
     builder: (context, _) {
       final query = _search.text.trim().toLowerCase();
-      final people = widget.store.persons
-          .where(
-            (person) =>
-                query.isEmpty ||
-                '${person.displayName} ${person.note}'.toLowerCase().contains(
-                  query,
-                ),
-          )
-          .toList();
+      final people = widget.store.persons.where((person) {
+        return query.isEmpty ||
+            '${person.displayName} ${person.note}'.toLowerCase().contains(
+              query,
+            );
+      }).toList();
       if (_nameSort) {
         people.sort((a, b) => a.displayName.compareTo(b.displayName));
       }
@@ -53,7 +51,7 @@ class _PeopleScreenState extends State<PeopleScreen> {
         body: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
               child: Semantics(
                 textField: true,
                 label: '相手を検索。名前とメモを対象にします',
@@ -83,7 +81,6 @@ class _PeopleScreenState extends State<PeopleScreen> {
                   label: '相手の並び順',
                   child: DropdownButton<bool>(
                     value: _nameSort,
-                    hint: const Text('並び順'),
                     items: const [
                       DropdownMenuItem(value: false, child: Text('作成順')),
                       DropdownMenuItem(value: true, child: Text('名前順')),
@@ -108,29 +105,44 @@ class _PeopleScreenState extends State<PeopleScreen> {
                             )
                           : null,
                     )
-                  : ListView.builder(
+                  : ListView.separated(
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
                       itemCount: people.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
                       itemBuilder: (context, index) {
                         final person = people[index];
                         final count = widget.store
                             .personTopicsFor(person.id)
                             .length;
+                        final note = person.note.trim().split('\n').first;
                         return Semantics(
                           button: true,
                           label: '${person.displayName}、話題$count件',
                           child: Card(
                             child: ListTile(
-                              leading: const CircleAvatar(
-                                child: Icon(Icons.person),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 6,
+                              ),
+                              leading: InitialAvatar(
+                                displayName: person.displayName,
                               ),
                               title: Text(person.displayName),
-                              subtitle: Text(
-                                person.note.trim().isEmpty
-                                    ? '話題$count件'
-                                    : '${person.note.trim().split('\n').first} ・ 話題$count件',
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (note.isNotEmpty)
+                                    Text(
+                                      note,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  if (note.isNotEmpty)
+                                    const SizedBox(height: 2),
+                                  Text('話題$count件'),
+                                ],
                               ),
-                              trailing: Text('$count件'),
+                              trailing: const Icon(Icons.chevron_right),
                               onTap: () => Navigator.of(context).push<void>(
                                 MaterialPageRoute(
                                   builder: (_) => PersonDetailScreen(

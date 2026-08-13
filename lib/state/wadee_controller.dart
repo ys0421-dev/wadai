@@ -28,6 +28,7 @@ class WadeeController extends ChangeNotifier {
   List<Topic> get topics => List.unmodifiable(
     _allTopics.where((topic) => !_archivedIds.contains(topic.id)),
   );
+  List<Topic> get allTopicsIncludingArchived => List.unmodifiable(_allTopics);
   List<Topic> get customTopics => List.unmodifiable(
     topics.where((topic) => topic.source == TopicSource.userCreated),
   );
@@ -222,6 +223,43 @@ class WadeeController extends ChangeNotifier {
     return candidate;
   });
 
+  /// Assigns every supplied active, unassigned topic in one persisted update.
+  ///
+  /// Validation deliberately happens inside the write queue, so a pending
+  /// mutation cannot make this operation partially succeed or create a
+  /// duplicate relation.
+  Future<bool> assignTopicsToPerson({
+    required String personId,
+    required Iterable<String> topicIds,
+  }) => _enqueueMutation((state) {
+    final ids = Set<String>.from(topicIds);
+    if (ids.isEmpty || !state.hasPerson(personId)) return null;
+
+    final assignedIds = state.personTopics
+        .where((item) => item.personId == personId)
+        .map((item) => item.topicId)
+        .toSet();
+    if (ids.any(
+      (id) => !state.hasActiveTopic(id) || assignedIds.contains(id),
+    )) {
+      return null;
+    }
+
+    final candidate = state.copy();
+    final now = DateTime.now();
+    candidate.personTopics.addAll(
+      ids.map(
+        (id) => PersonTopic(
+          personId: personId,
+          topicId: id,
+          note: '',
+          createdAt: now,
+        ),
+      ),
+    );
+    return candidate;
+  });
+
   Future<bool> updatePersonTopicNote({
     required String personId,
     required String topicId,
@@ -234,6 +272,22 @@ class WadeeController extends ChangeNotifier {
     final candidate = state.copy();
     candidate.personTopics[index] = candidate.personTopics[index].copyWith(
       note: note,
+    );
+    return candidate;
+  });
+
+  Future<bool> updatePersonTopicStatus({
+    required String personId,
+    required String topicId,
+    required PersonTopicStatus status,
+  }) => _enqueueMutation((state) {
+    final index = state.personTopics.indexWhere(
+      (item) => item.personId == personId && item.topicId == topicId,
+    );
+    if (index == -1) return null;
+    final candidate = state.copy();
+    candidate.personTopics[index] = candidate.personTopics[index].copyWith(
+      status: status,
     );
     return candidate;
   });

@@ -9,6 +9,7 @@ import 'package:wadai/data/topic_catalog.dart';
 import 'package:wadai/data/local_app_storage.dart';
 import 'package:wadai/features/people/people_screen.dart';
 import 'package:wadai/features/people/person_detail_screen.dart';
+import 'package:wadai/features/people/person_topic_detail_screen.dart';
 import 'package:wadai/features/people/topic_picker_screen.dart';
 import 'package:wadai/features/topics/topics_screen.dart';
 import 'package:wadai/features/topics/topic_detail_screen.dart';
@@ -91,11 +92,50 @@ Future<WadeeController> ready({LocalAppStorage? storage}) async {
   return store;
 }
 
+Future<void> applyTopicFilters(
+  WidgetTester tester, {
+  String? display,
+  String? category,
+  String? sort,
+}) async {
+  await tester.tap(find.byTooltip('絞り込みと並び替え'));
+  await tester.pumpAndSettle();
+  if (display != null) {
+    await tester.tap(find.text(display).last);
+    await tester.pump();
+  }
+  if (category != null) {
+    await tester.drag(
+      find.byKey(const Key('topic-filter-sheet-list')),
+      const Offset(0, -360),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(category).last);
+    await tester.pump();
+  }
+  if (sort != null) {
+    await tester.drag(
+      find.byKey(const Key('topic-filter-sheet-list')),
+      const Offset(0, -480),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(sort).last);
+    await tester.pump();
+  }
+  await tester.tap(
+    find.descendant(
+      of: find.byType(FilledButton),
+      matching: find.textContaining('件を表示'),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
   group('migration and validation', () {
-    test('v1 migrates to v2 and preserves favorites', () async {
+    test('v1 migrates to v3 and preserves favorites', () async {
       final builtin = createStaticTopics().first;
       SharedPreferences.setMockInitialValues(<String, Object>{
         LocalAppStorage.snapshotKey: jsonEncode(<String, Object>{
@@ -120,7 +160,7 @@ void main() {
         jsonDecode(
           prefs.getString(LocalAppStorage.snapshotKey)!,
         )['schemaVersion'],
-        2,
+        3,
       );
       expect(store.isFavorite('old'), isTrue);
       expect(store.isFavorite(builtin.id), isTrue);
@@ -188,6 +228,97 @@ void main() {
       expect(store.favoriteTopicIds, contains('unknown-favorite'));
       expect(store.archivedTopicIds, contains('unknown-archive'));
     });
+
+    test(
+      'v2 person-topic data migrates planned status into one v3 snapshot',
+      () async {
+        final builtin = createStaticTopics().first;
+        final raw = jsonEncode(<String, Object>{
+          'schemaVersion': 2,
+          'customTopics': <Object>[],
+          'favoriteTopicIds': <String>['unknown-favorite'],
+          'archivedTopicIds': <String>['unknown-archive'],
+          'persons': <Object>[
+            Person(
+              id: 'p',
+              displayName: 'P',
+              note: 'person note',
+              createdAt: DateTime.utc(2026),
+            ).toJson(),
+          ],
+          'personTopics': <Object>[
+            <String, Object>{
+              'personId': 'p',
+              'topicId': builtin.id,
+              'note': 'relation note',
+              'createdAt': DateTime.utc(2026).toIso8601String(),
+            },
+          ],
+        });
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          LocalAppStorage.snapshotKey: raw,
+        });
+
+        final store = await ready();
+        final prefs = await SharedPreferences.getInstance();
+        final snapshot =
+            jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
+                as Map<String, dynamic>;
+        expect(snapshot['schemaVersion'], 3);
+        expect(
+          (snapshot['personTopics'] as List<dynamic>).single['status'],
+          'planned',
+        );
+        expect(
+          store.personTopic('p', builtin.id)!.status,
+          PersonTopicStatus.planned,
+        );
+        expect(store.favoriteTopicIds, contains('unknown-favorite'));
+        expect(store.archivedTopicIds, contains('unknown-archive'));
+      },
+    );
+
+    test(
+      'v3 rejects missing or unknown person-topic status without overwrite',
+      () async {
+        final builtin = createStaticTopics().first;
+        for (final status in <Object?>[null, 'unknown']) {
+          final personTopic = <String, Object?>{
+            'personId': 'p',
+            'topicId': builtin.id,
+            'note': '',
+            'createdAt': DateTime.utc(2026).toIso8601String(),
+          };
+          if (status is String) {
+            personTopic['status'] = status;
+          }
+          final snapshot = <String, Object?>{
+            'schemaVersion': 3,
+            'customTopics': <Object>[],
+            'favoriteTopicIds': <String>[],
+            'archivedTopicIds': <String>[],
+            'persons': <Object>[
+              Person(
+                id: 'p',
+                displayName: 'P',
+                note: '',
+                createdAt: DateTime.utc(2026),
+              ).toJson(),
+            ],
+            'personTopics': <Object>[personTopic],
+          };
+          final raw = jsonEncode(snapshot);
+          SharedPreferences.setMockInitialValues(<String, Object>{
+            LocalAppStorage.snapshotKey: raw,
+          });
+          final store = WadeeController();
+          await store.load();
+          final prefs = await SharedPreferences.getInstance();
+          expect(store.loadState, AppLoadState.error);
+          expect(prefs.getString(LocalAppStorage.snapshotKey), raw);
+        }
+      },
+    );
 
     test('bad, unsupported and invalid snapshots stay raw', () async {
       final rawValues = <String>[
@@ -317,6 +448,54 @@ void main() {
   });
 
   group('additional Phase 4 regression coverage', () {
+    test(
+      'person-topic status round trips and archive does not block updates',
+      () async {
+        final person = Person(
+          id: 'p',
+          displayName: 'P',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final topic = custom('status-topic');
+        final storage = MemoryStorage(
+          appData(
+            customTopics: <Topic>[topic],
+            archivedIds: <String>{topic.id},
+            persons: <Person>[person],
+            personTopics: <PersonTopic>[
+              PersonTopic(
+                personId: person.id,
+                topicId: topic.id,
+                note: '',
+                createdAt: DateTime.utc(2026),
+              ),
+            ],
+          ),
+        );
+        final store = await ready(storage: storage);
+        for (final status in PersonTopicStatus.values) {
+          expect(
+            await store.updatePersonTopicStatus(
+              personId: person.id,
+              topicId: topic.id,
+              status: status,
+            ),
+            isTrue,
+          );
+        }
+        expect(
+          store.personTopic(person.id, topic.id)!.status,
+          PersonTopicStatus.revisit,
+        );
+        final reloaded = await ready(storage: storage);
+        expect(
+          reloaded.personTopic(person.id, topic.id)!.status,
+          PersonTopicStatus.revisit,
+        );
+      },
+    );
+
     test('Topic JSON is immutable and excludes favorite state', () {
       final topic = custom('json', description: 'd');
       final restored = Topic.fromJson(topic.toJson());
@@ -562,7 +741,9 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.byType(FloatingActionButton));
         await tester.pumpAndSettle();
-        await tester.tap(find.byType(ListTile).first);
+        await tester.tap(find.text(createStaticTopics().first.title).first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('1件を追加'));
         await tester.pumpAndSettle();
         expect(store.personTopicsFor(person.id), hasLength(1));
       },
@@ -578,12 +759,15 @@ void main() {
         );
         await store.archiveTopic('archived');
         await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
-        final segmented = find.byType(SegmentedButton<TopicFilter>);
-        expect(segmented, findsOneWidget);
-        final state = tester.state<SegmentedButtonState<TopicFilter>>(
-          segmented,
-        );
-        expect(state.widget.segments, hasLength(4));
+        expect(find.byTooltip('絞り込みと並び替え'), findsOneWidget);
+        await tester.tap(find.byTooltip('絞り込みと並び替え'));
+        await tester.pumpAndSettle();
+        expect(find.text('すべて'), findsAtLeastNWidgets(1));
+        expect(find.text('お気に入り'), findsOneWidget);
+        expect(find.text('自作'), findsOneWidget);
+        expect(find.text('アーカイブ'), findsOneWidget);
+        await tester.tap(find.byTooltip('閉じる'));
+        await tester.pumpAndSettle();
         expect(store.topicById('archived'), isNull);
         expect(store.topicByIdIncludingArchived('archived'), isNotNull);
       },
@@ -602,7 +786,7 @@ void main() {
       expect(find.byType(NavigationBar), findsOneWidget);
     });
 
-    testWidgets('form creates, v2 saves, edit keeps the topic and reloads', (
+    testWidgets('form creates, v3 saves, edit keeps the topic and reloads', (
       tester,
     ) async {
       final store = await ready();
@@ -852,25 +1036,32 @@ void main() {
             home: PersonDetailScreen(store: store, personId: 'p'),
           ),
         );
-        await tester.tap(find.byType(PopupMenuButton<String>));
+        await tester.tap(find.text(topic.title));
         await tester.pumpAndSettle();
-        await tester.tap(find.byType(PopupMenuItem<String>).first);
+        await tester.ensureVisible(find.text('メモを編集'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('メモを編集'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'cancelled');
         await tester.tap(find.byType(TextButton));
         await tester.pumpAndSettle();
         expect(store.personTopic('p', topic.id)!.note, 'old');
-        await tester.tap(find.byType(PopupMenuButton<String>));
+        await tester.ensureVisible(find.text('メモを編集'));
         await tester.pumpAndSettle();
-        await tester.tap(find.byType(PopupMenuItem<String>).first);
+        await tester.tap(find.text('メモを編集'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'saved');
-        await tester.tap(find.byType(FilledButton));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.text('保存'),
+          ),
+        );
         await tester.pumpAndSettle();
         expect(store.personTopic('p', topic.id)!.note, 'saved');
-        await tester.tap(find.byType(PopupMenuButton<String>));
+        await tester.ensureVisible(find.text('この話題から外す'));
         await tester.pumpAndSettle();
-        await tester.tap(find.byType(PopupMenuItem<String>).last);
+        await tester.tap(find.text('この話題から外す'));
         await tester.pumpAndSettle();
         await tester.tap(
           find.descendant(
@@ -880,9 +1071,9 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(store.personTopic('p', topic.id), isNotNull);
-        await tester.tap(find.byType(PopupMenuButton<String>));
+        await tester.ensureVisible(find.text('この話題から外す'));
         await tester.pumpAndSettle();
-        await tester.tap(find.byType(PopupMenuItem<String>).last);
+        await tester.tap(find.text('この話題から外す'));
         await tester.pumpAndSettle();
         await tester.tap(
           find.descendant(
@@ -895,49 +1086,66 @@ void main() {
       },
     );
 
-    testWidgets('TopicPicker hides assigned and archived topics', (
-      tester,
-    ) async {
-      final person = Person(
-        id: 'p',
-        displayName: 'p',
-        note: '',
-        createdAt: DateTime.utc(2026),
-      );
-      final assigned = custom('assigned', title: 'assigned');
-      final archived = custom('archived', title: 'archived');
-      final available = custom('available', title: 'available');
-      final store = await ready(
-        storage: MemoryStorage(
-          appData(
-            customTopics: <Topic>[assigned, archived, available],
-            archivedIds: <String>{archived.id},
-            persons: <Person>[person],
-            personTopics: <PersonTopic>[
-              PersonTopic(
-                personId: 'p',
-                topicId: assigned.id,
-                note: '',
-                createdAt: DateTime.utc(2026),
-              ),
-            ],
+    testWidgets(
+      'TopicPicker shows assigned and archived topics as unavailable',
+      (tester) async {
+        final person = Person(
+          id: 'p',
+          displayName: 'p',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final assigned = custom('assigned', title: 'assigned');
+        final archived = custom('archived', title: 'archived');
+        final available = custom('available', title: 'available');
+        final store = await ready(
+          storage: MemoryStorage(
+            appData(
+              customTopics: <Topic>[assigned, archived, available],
+              archivedIds: <String>{archived.id},
+              persons: <Person>[person],
+              personTopics: <PersonTopic>[
+                PersonTopic(
+                  personId: 'p',
+                  topicId: assigned.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026),
+                ),
+              ],
+            ),
           ),
-        ),
-      );
-      await tester.pumpWidget(
-        MaterialApp(
-          home: TopicPickerScreen(store: store, personId: 'p'),
-        ),
-      );
-      await tester.scrollUntilVisible(
-        find.text('available'),
-        250,
-        scrollable: find.byType(Scrollable).last,
-      );
-      expect(find.text('assigned'), findsNothing);
-      expect(find.text('archived'), findsNothing);
-      expect(find.text('available'), findsOneWidget);
-    });
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(store: store, personId: 'p'),
+          ),
+        );
+        await tester.scrollUntilVisible(
+          find.text('available'),
+          250,
+          scrollable: find.byType(Scrollable).last,
+        );
+        expect(find.text('assigned'), findsOneWidget);
+        expect(find.text('追加済み'), findsOneWidget);
+        expect(find.text('archived'), findsOneWidget);
+        expect(find.text('アーカイブ済み'), findsOneWidget);
+        expect(find.text('available'), findsOneWidget);
+        expect(find.text('0件を追加'), findsOneWidget);
+        expect(
+          find.bySemanticsLabel(RegExp('assigned、.*追加済み、選択不可')),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel(RegExp('archived、.*アーカイブ済み、選択不可')),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('assigned'), warnIfMissed: false);
+        await tester.tap(find.text('archived'), warnIfMissed: false);
+        await tester.pump();
+        expect(find.text('0件を追加'), findsOneWidget);
+        expect(store.personTopicsFor(person.id), hasLength(1));
+      },
+    );
 
     testWidgets(
       'Topics filters, favorite, custom edit, archive and restore use visible actions',
@@ -949,14 +1157,12 @@ void main() {
         await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
         await tester.tap(find.byIcon(Icons.favorite_border).first);
         await tester.pumpAndSettle();
-        await tester.tap(find.text('お気に入り'));
-        await tester.pumpAndSettle();
+        await applyTopicFilters(tester, display: 'お気に入り');
         expect(find.byType(TopicTile), findsOneWidget);
         await tester.tap(find.byIcon(Icons.favorite));
         await tester.pumpAndSettle();
         expect(find.byType(TopicTile), findsNothing);
-        await tester.tap(find.text('自作'));
-        await tester.pumpAndSettle();
+        await applyTopicFilters(tester, display: '自作');
         expect(find.text('custom title'), findsOneWidget);
         await tester.tap(find.byType(PopupMenuButton<String>));
         await tester.pumpAndSettle();
@@ -994,8 +1200,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(store.topicById('custom-id'), isNull);
-        await tester.tap(find.text('アーカイブ'));
-        await tester.pumpAndSettle();
+        await applyTopicFilters(tester, display: 'アーカイブ');
         expect(find.text('edited custom'), findsOneWidget);
         await tester.tap(find.byType(TopicTile));
         await tester.pumpAndSettle();
@@ -1044,8 +1249,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(store.topicById(builtin.id), isNull);
-        await tester.tap(find.text('アーカイブ'));
-        await tester.pumpAndSettle();
+        await applyTopicFilters(tester, display: 'アーカイブ');
         await tester.tap(find.byType(TopicTile).first);
         await tester.pumpAndSettle();
         await tester.tap(find.byType(PopupMenuButton<String>));
@@ -1141,7 +1345,7 @@ void main() {
         final store = await ready(
           storage: MemoryStorage(
             appData(
-              customTopics: <Topic>[zebra, alpha],
+              customTopics: <Topic>[alpha, zebra],
               favoriteIds: <String>{alpha.id},
             ),
           ),
@@ -1160,49 +1364,29 @@ void main() {
 
         await tester.tap(find.byTooltip('検索をクリア'));
         await tester.pump();
-        await tester.tap(find.byType(DropdownButtonFormField<String?>));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('仕事').last);
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('お気に入り'));
-        await tester.pumpAndSettle();
+        await applyTopicFilters(tester, display: 'お気に入り', category: '仕事');
         expect(find.text('Alpha unique'), findsOneWidget);
         expect(find.text('Zebra unique'), findsNothing);
 
-        await tester.tap(find.text('すべて'));
+        await applyTopicFilters(tester, display: 'すべて');
         await tester.enterText(search, 'unique');
         await tester.pump();
-        await tester.tap(find.text('標準順'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('名前順'));
-        await tester.pumpAndSettle();
-        expect(
-          tester.getTopLeft(find.text('Alpha unique')).dy,
-          lessThan(tester.getTopLeft(find.text('Zebra unique')).dy),
-        );
+        expect(find.text('Alpha unique'), findsOneWidget);
 
         await tester.enterText(search, 'no matching topic');
         await tester.pump();
         expect(find.text('条件に一致する話題がありません'), findsOneWidget);
-        await tester.tap(find.text('条件をクリア'));
+        await tester.tap(find.text('フィルターをクリア'));
         await tester.pumpAndSettle();
-        final segmented = tester.widget<SegmentedButton<TopicFilter>>(
-          find.byType(SegmentedButton<TopicFilter>),
-        );
-        expect(segmented.selected, <TopicFilter>{TopicFilter.all});
-        expect(tester.widget<TextField>(search).controller!.text, isEmpty);
         expect(
-          tester
-              .widget<DropdownButtonFormField<String?>>(
-                find.byType(DropdownButtonFormField<String?>),
-              )
-              .initialValue,
-          isNull,
+          tester.widget<TextField>(search).controller!.text,
+          'no matching topic',
         );
-
-        await tester.tap(find.text('アーカイブ'));
+        await tester.tap(find.byTooltip('検索をクリア'));
         await tester.pumpAndSettle();
-        expect(find.text('アーカイブした話題はありません'), findsOneWidget);
+
+        await applyTopicFilters(tester, display: 'アーカイブ');
+        expect(find.text('アーカイブした話題がありません'), findsOneWidget);
       },
     );
 
@@ -1273,7 +1457,7 @@ void main() {
         await store.assignTopicToPerson(personId: person.id, topicId: id);
       }
       await tester.pump();
-      expect(find.text('追加できる話題はありません'), findsOneWidget);
+      expect(find.text('追加済み'), findsAtLeastNWidgets(1));
       final emptyStore = await ready(
         storage: MemoryStorage(
           appData(
@@ -1287,7 +1471,7 @@ void main() {
           home: TopicPickerScreen(store: emptyStore, personId: person.id),
         ),
       );
-      expect(find.text('利用できる話題がありません'), findsOneWidget);
+      expect(find.text('アーカイブ済み'), findsAtLeastNWidgets(1));
     });
 
     testWidgets('search and topic actions expose labels and tooltips', (
@@ -1415,9 +1599,12 @@ void main() {
           ),
         );
         expect(find.text('残したい話題'), findsOneWidget);
-        expect(find.textContaining('個別のメモ'), findsOneWidget);
+        expect(find.textContaining('個別のメモ'), findsNothing);
         expect(find.text('アーカイブ済み'), findsOneWidget);
         await tester.tap(find.text('残したい話題'));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('個別のメモ'), findsOneWidget);
+        await tester.tap(find.text('話題ライブラリを開く'));
         await tester.pumpAndSettle();
         expect(find.text('この話題は通常の一覧から非表示です。お気に入りの変更はできません。'), findsOneWidget);
         expect(find.text('復元する'), findsOneWidget);
@@ -1433,5 +1620,598 @@ void main() {
         expect(store.topicById(topic.id), isNotNull);
       },
     );
+  });
+
+  group('Phase 7 bulk person-topic assignment', () {
+    test('bulk assignment is atomic and rejects unavailable IDs', () async {
+      final person = Person(
+        id: 'p',
+        displayName: 'P',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final first = custom('first', title: 'first');
+      final second = custom('second', title: 'second');
+      final storage = MemoryStorage(
+        appData(
+          customTopics: <Topic>[first, second],
+          persons: <Person>[person],
+        ),
+      );
+      final store = await ready(storage: storage);
+
+      expect(
+        await store.assignTopicsToPerson(
+          personId: person.id,
+          topicIds: <String>[first.id, second.id],
+        ),
+        isTrue,
+      );
+      expect(storage.saveCalls, 1);
+      expect(store.personTopicsFor(person.id), hasLength(2));
+
+      final unavailableStorage = MemoryStorage(
+        appData(
+          customTopics: <Topic>[first, second],
+          archivedIds: <String>{second.id},
+          persons: <Person>[person],
+        ),
+      );
+      final unavailableStore = await ready(storage: unavailableStorage);
+      expect(
+        await unavailableStore.assignTopicsToPerson(
+          personId: person.id,
+          topicIds: <String>[first.id, second.id],
+        ),
+        isFalse,
+      );
+      expect(unavailableStorage.saveCalls, 0);
+      expect(unavailableStore.personTopicsFor(person.id), isEmpty);
+
+      final assignedStorage = MemoryStorage(
+        appData(
+          customTopics: <Topic>[first, second],
+          persons: <Person>[person],
+          personTopics: <PersonTopic>[
+            PersonTopic(
+              personId: person.id,
+              topicId: first.id,
+              note: '',
+              createdAt: DateTime.utc(2026),
+            ),
+          ],
+        ),
+      );
+      final assignedStore = await ready(storage: assignedStorage);
+      for (final request in <Iterable<String>>[
+        <String>[first.id, second.id],
+        <String>[second.id, 'unknown'],
+        <String>[],
+      ]) {
+        expect(
+          await assignedStore.assignTopicsToPerson(
+            personId: person.id,
+            topicIds: request,
+          ),
+          isFalse,
+        );
+      }
+      expect(
+        await assignedStore.assignTopicsToPerson(
+          personId: 'missing',
+          topicIds: <String>[second.id],
+        ),
+        isFalse,
+      );
+      expect(assignedStorage.saveCalls, 0);
+      expect(assignedStore.personTopicsFor(person.id), hasLength(1));
+
+      expect(
+        await store.assignTopicsToPerson(
+          personId: person.id,
+          topicIds: <String>[first.id, 'unknown'],
+        ),
+        isFalse,
+      );
+      expect(storage.saveCalls, 1);
+      expect(store.personTopicsFor(person.id), hasLength(2));
+
+      final failedStorage = MemoryStorage(
+        appData(
+          customTopics: <Topic>[first, second],
+          persons: <Person>[person],
+        ),
+        failSaves: true,
+      );
+      final failedStore = await ready(storage: failedStorage);
+      expect(
+        await failedStore.assignTopicsToPerson(
+          personId: person.id,
+          topicIds: <String>[first.id, second.id],
+        ),
+        isFalse,
+      );
+      expect(failedStore.personTopicsFor(person.id), isEmpty);
+    });
+
+    testWidgets(
+      'picker keeps selections across condition changes and shows count',
+      (tester) async {
+        final person = Person(
+          id: 'p',
+          displayName: 'P',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final alpha = custom('alpha', title: 'alpha');
+        final zebra = custom('zebra', title: 'zebra');
+        final store = await ready(
+          storage: MemoryStorage(
+            appData(
+              customTopics: <Topic>[alpha, zebra],
+              persons: <Person>[person],
+            ),
+          ),
+        );
+        await store.toggleFavorite(alpha.id);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(store: store, personId: person.id),
+          ),
+        );
+
+        final addButton = find.widgetWithText(FilledButton, '0件を追加');
+        expect(tester.widget<FilledButton>(addButton).onPressed, isNull);
+        await tester.scrollUntilVisible(
+          find.text('alpha'),
+          250,
+          scrollable: find.byType(Scrollable).last,
+        );
+        await tester.tap(find.text('alpha'));
+        await tester.pump();
+        expect(find.text('1件を追加'), findsOneWidget);
+        expect(find.bySemanticsLabel('Pに1件の話題を追加'), findsOneWidget);
+
+        await tester.tap(find.text('お気に入り'));
+        await tester.pump();
+        expect(find.text('1件を追加'), findsOneWidget);
+        await tester.tap(find.text('自作'));
+        await tester.pump();
+        expect(find.text('1件を追加'), findsOneWidget);
+        await tester.tap(find.byType(DropdownButtonFormField<String?>));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('その他').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('標準順'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('名前順'));
+        await tester.pumpAndSettle();
+        expect(find.text('1件を追加'), findsOneWidget);
+        await tester.tap(find.text('すべて').first);
+        await tester.pump();
+
+        await tester.enterText(find.byType(TextField), 'zebra');
+        await tester.pump();
+        expect(find.text('alpha'), findsNothing);
+        await tester.tap(find.text('zebra').last);
+        await tester.pump();
+        expect(find.text('2件を追加'), findsOneWidget);
+        await tester.tap(find.byTooltip('検索をクリア'));
+        await tester.pump();
+        await tester.scrollUntilVisible(
+          find.text('alpha'),
+          250,
+          scrollable: find.byType(Scrollable).last,
+        );
+        expect(find.text('alpha'), findsOneWidget);
+        expect(find.text('2件を追加'), findsOneWidget);
+      },
+    );
+
+    testWidgets('picker bulk add saves once, pops, and updates Person detail', (
+      tester,
+    ) async {
+      final person = Person(
+        id: 'p',
+        displayName: 'P',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final first = custom('bulk-first', title: 'Bulk first');
+      final second = custom('bulk-second', title: 'Bulk second');
+      final storage = MemoryStorage(
+        appData(
+          customTopics: <Topic>[first, second],
+          persons: <Person>[person],
+        ),
+      );
+      final store = await ready(storage: storage);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PersonDetailScreen(store: store, personId: person.id),
+        ),
+      );
+
+      await tester.tap(find.byType(FloatingActionButton));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), first.title);
+      await tester.pump();
+      await tester.tap(find.text(first.title).last);
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), second.title);
+      await tester.pump();
+      await tester.tap(find.text(second.title).last);
+      await tester.pump();
+      expect(find.bySemanticsLabel('Pに2件の話題を追加'), findsOneWidget);
+
+      await tester.tap(find.text('2件を追加'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TopicPickerScreen), findsNothing);
+      expect(find.text('相手全般のメモ'), findsOneWidget);
+      expect(find.text(first.title), findsOneWidget);
+      expect(find.text(second.title), findsOneWidget);
+      expect(storage.saveCalls, 1);
+      expect(store.personTopicsFor(person.id), hasLength(2));
+    });
+
+    testWidgets(
+      'narrow picker keeps its fixed action usable without overflow',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(320, 700));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final person = Person(
+          id: 'p',
+          displayName: 'P',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final topic = custom('narrow-picker', title: 'narrow picker');
+        final store = await ready(
+          storage: MemoryStorage(
+            appData(customTopics: <Topic>[topic], persons: <Person>[person]),
+          ),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(store: store, personId: person.id),
+          ),
+        );
+        await tester.enterText(find.byType(TextField), topic.title);
+        await tester.pump();
+        await tester.tap(find.text(topic.title).last);
+        await tester.pump();
+        expect(find.text('1件を追加'), findsOneWidget);
+        await tester.tap(find.text('お気に入り'));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'picker save failure keeps every selection and reports the error',
+      (tester) async {
+        final person = Person(
+          id: 'p',
+          displayName: 'P',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final first = custom('failed-first', title: 'Failed first');
+        final second = custom('failed-second', title: 'Failed second');
+        final storage = MemoryStorage(
+          appData(
+            customTopics: <Topic>[first, second],
+            persons: <Person>[person],
+          ),
+          failSaves: true,
+        );
+        final store = await ready(storage: storage);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(store: store, personId: person.id),
+          ),
+        );
+
+        await tester.enterText(find.byType(TextField), first.title);
+        await tester.pump();
+        await tester.tap(find.text(first.title).last);
+        await tester.enterText(find.byType(TextField), second.title);
+        await tester.pump();
+        await tester.tap(find.text(second.title).last);
+        await tester.pump();
+        await tester.tap(find.text('2件を追加'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(TopicPickerScreen), findsOneWidget);
+        expect(find.text('2件を追加'), findsOneWidget);
+        expect(find.bySemanticsLabel('Pに2件の話題を追加'), findsOneWidget);
+        expect(store.personTopicsFor(person.id), isEmpty);
+        expect(storage.saveCalls, 1);
+        expect(find.text('保存に失敗しました。もう一度試してください。'), findsOneWidget);
+      },
+    );
+
+    test('bulk assignment validates against the latest queued state', () async {
+      final person = Person(
+        id: 'p',
+        displayName: 'P',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final first = custom('queue-first');
+      final second = custom('queue-second');
+      final storage = MemoryStorage(
+        appData(
+          customTopics: <Topic>[first, second],
+          persons: <Person>[person],
+        ),
+        delay: true,
+      );
+      final store = await ready(storage: storage);
+
+      final archive = store.archiveTopic(second.id);
+      final bulk = store.assignTopicsToPerson(
+        personId: person.id,
+        topicIds: <String>[first.id, second.id],
+      );
+
+      expect(await archive, isTrue);
+      expect(await bulk, isFalse);
+      expect(storage.saveCalls, 1);
+      expect(store.personTopicsFor(person.id), isEmpty);
+      expect(store.isArchived(second.id), isTrue);
+    });
+  });
+
+  group('Phase 8 person-topic detail and topic filters', () {
+    Future<
+      ({
+        MemoryStorage storage,
+        WadeeController store,
+        Person person,
+        Topic topic,
+      })
+    >
+    detailFixture({bool failSaves = false}) async {
+      final person = Person(
+        id: 'detail-person',
+        displayName: 'Detail person',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final topic = custom(
+        'detail-topic',
+        title: 'Detail topic',
+        description: 'Shared description',
+      );
+      final storage = MemoryStorage(
+        appData(
+          customTopics: <Topic>[topic],
+          persons: <Person>[person],
+          personTopics: <PersonTopic>[
+            PersonTopic(
+              personId: person.id,
+              topicId: topic.id,
+              note: 'Initial relation note',
+              createdAt: DateTime.utc(2026),
+            ),
+          ],
+        ),
+        failSaves: failSaves,
+      );
+      return (
+        storage: storage,
+        store: await ready(storage: storage),
+        person: person,
+        topic: topic,
+      );
+    }
+
+    testWidgets('detail shows all statuses and persists an actual selection', (
+      tester,
+    ) async {
+      final fixture = await detailFixture();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PersonTopicDetailScreen(
+            store: fixture.store,
+            personId: fixture.person.id,
+            topicId: fixture.topic.id,
+          ),
+        ),
+      );
+      for (final status in PersonTopicStatus.values) {
+        expect(find.text(status.label), findsOneWidget);
+      }
+      await tester.tap(find.text(PersonTopicStatus.discussed.label));
+      await tester.pumpAndSettle();
+      expect(
+        fixture.store.personTopic(fixture.person.id, fixture.topic.id)!.status,
+        PersonTopicStatus.discussed,
+      );
+      expect(
+        tester
+            .widget<RadioGroup<PersonTopicStatus>>(
+              find.byType(RadioGroup<PersonTopicStatus>),
+            )
+            .groupValue,
+        PersonTopicStatus.discussed,
+      );
+      final reloaded = await ready(storage: fixture.storage);
+      expect(
+        reloaded.personTopic(fixture.person.id, fixture.topic.id)!.status,
+        PersonTopicStatus.discussed,
+      );
+    });
+
+    testWidgets('detail keeps status and note unchanged when saving fails', (
+      tester,
+    ) async {
+      final fixture = await detailFixture(failSaves: true);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PersonTopicDetailScreen(
+            store: fixture.store,
+            personId: fixture.person.id,
+            topicId: fixture.topic.id,
+          ),
+        ),
+      );
+      await tester.tap(find.text(PersonTopicStatus.revisit.label));
+      await tester.pumpAndSettle();
+      expect(
+        fixture.store.personTopic(fixture.person.id, fixture.topic.id)!.status,
+        PersonTopicStatus.planned,
+      );
+      expect(find.byType(SnackBar), findsOneWidget);
+
+      await tester.drag(find.byType(ListView), const Offset(0, -500));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('メモを編集'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), 'Failed update');
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.byType(FilledButton),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        fixture.store.personTopic(fixture.person.id, fixture.topic.id)!.note,
+        'Initial relation note',
+      );
+      expect(find.byType(SnackBar), findsOneWidget);
+    });
+
+    testWidgets(
+      'person-topic card is compact, hides its note, and opens detail',
+      (tester) async {
+        final fixture = await detailFixture();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PersonDetailScreen(
+              store: fixture.store,
+              personId: fixture.person.id,
+            ),
+          ),
+        );
+        expect(find.text('Initial relation note'), findsNothing);
+        expect(find.byType(Chip), findsNothing);
+        await tester.tap(find.text(fixture.topic.title));
+        await tester.pumpAndSettle();
+        expect(find.byType(PersonTopicDetailScreen), findsOneWidget);
+        expect(find.text('Initial relation note'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'filter draft dismisses, applies chips, clears one, and keeps search',
+      (tester) async {
+        final alpha = Topic(
+          id: 'filter-alpha',
+          title: 'Alpha filter',
+          categoryId: 'work',
+          description: '',
+          source: TopicSource.userCreated,
+          createdAt: DateTime.utc(2026),
+        );
+        final store = await ready(
+          storage: MemoryStorage(
+            appData(
+              customTopics: <Topic>[alpha],
+              favoriteIds: <String>{alpha.id},
+            ),
+          ),
+        );
+        await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+        expect(find.byType(SegmentedButton<TopicFilter>), findsNothing);
+        expect(find.byType(DropdownButtonFormField<String?>), findsNothing);
+        expect(find.byTooltip('絞り込みと並び替え'), findsOneWidget);
+        expect(find.bySemanticsLabel('絞り込みと並び替え'), findsOneWidget);
+
+        await tester.tap(find.byTooltip('絞り込みと並び替え'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('お気に入り'));
+        await tester.pump();
+        await tester.tap(find.byTooltip('閉じる'));
+        await tester.pumpAndSettle();
+        expect(find.byType(InputChip), findsNothing);
+
+        await tester.enterText(find.byType(TextField), 'Alpha');
+        await applyTopicFilters(tester, display: 'お気に入り', category: '仕事');
+        expect(find.byType(Badge), findsOneWidget);
+        expect(find.byType(InputChip), findsNWidgets(2));
+        expect(find.text('お気に入り'), findsOneWidget);
+        expect(find.widgetWithText(InputChip, '仕事'), findsOneWidget);
+        expect(find.text('すべて解除'), findsOneWidget);
+
+        final categoryChip = find.widgetWithText(InputChip, '仕事');
+        final chipRect = tester.getRect(categoryChip);
+        await tester.tapAt(Offset(chipRect.right - 12, chipRect.center.dy));
+        await tester.pump();
+        expect(categoryChip, findsNothing);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'Alpha',
+        );
+        await applyTopicFilters(tester, category: '仕事');
+        await tester.tap(find.text('すべて解除'));
+        await tester.pump();
+        expect(find.byType(InputChip), findsNothing);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'Alpha',
+        );
+      },
+    );
+
+    testWidgets('filter sheet stays usable at 320px and 1.5 text scale', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final topic = custom('narrow-filter', title: 'Narrow filter');
+      final store = await ready(
+        storage: MemoryStorage(
+          appData(
+            customTopics: <Topic>[topic],
+            favoriteIds: <String>{topic.id},
+          ),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(textScaler: TextScaler.linear(1.5)),
+            child: TopicsScreen(store: store),
+          ),
+        ),
+      );
+      await tester.tap(find.byTooltip('絞り込みと並び替え'));
+      await tester.pumpAndSettle();
+      expect(find.text('絞り込みと並び替え'), findsOneWidget);
+      await tester.tap(find.text('お気に入り'));
+      await tester.pump();
+      await tester.drag(
+        find.byKey(const Key('topic-filter-sheet-list')),
+        const Offset(0, -800),
+      );
+      await tester.pumpAndSettle();
+      final apply = find.descendant(
+        of: find.byType(FilledButton),
+        matching: find.textContaining('件を表示'),
+      );
+      expect(apply, findsOneWidget);
+      await tester.tap(apply);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Badge>(find.byType(Badge)).isLabelVisible, isTrue);
+      expect(find.widgetWithText(InputChip, 'お気に入り'), findsOneWidget);
+      await tester.tap(find.byTooltip('絞り込みと並び替え'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('閉じる'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
   });
 }

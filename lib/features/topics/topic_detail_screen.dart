@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../app/app_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../state/wadee_controller.dart';
 import 'category_icon.dart';
@@ -78,7 +79,7 @@ class TopicDetailScreen extends StatelessWidget {
                 topic.title,
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                   fontWeight: FontWeight.w800,
-                  color: const Color(0xFF34231D),
+                  color: appTextColor,
                 ),
               ),
               if (archived) ...[
@@ -101,7 +102,7 @@ class TopicDetailScreen extends StatelessWidget {
               const Text(
                 'カテゴリー',
                 style: TextStyle(
-                  color: Color(0xFF856E64),
+                  color: appSecondaryTextColor,
                   fontWeight: FontWeight.w700,
                 ),
               ),
@@ -115,8 +116,8 @@ class TopicDetailScreen extends StatelessWidget {
                 width: double.infinity,
                 padding: const EdgeInsets.all(22),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF6E9E1),
-                  borderRadius: BorderRadius.circular(24),
+                  color: appSubtleColor,
+                  borderRadius: BorderRadius.circular(16),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -137,7 +138,7 @@ class TopicDetailScreen extends StatelessWidget {
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w800,
                         height: 1.55,
-                        color: const Color(0xFF4E2F23),
+                        color: appTextColor,
                       ),
                     ),
                   ],
@@ -148,7 +149,7 @@ class TopicDetailScreen extends StatelessWidget {
                 const Text(
                   'メモ',
                   style: TextStyle(
-                    color: Color(0xFF856E64),
+                    color: appSecondaryTextColor,
                     fontWeight: FontWeight.w700,
                   ),
                 ),

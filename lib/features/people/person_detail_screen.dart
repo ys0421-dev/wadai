@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../../models/person.dart';
 import '../../models/person_topic.dart';
-import '../../state/wadee_controller.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../../shared/widgets/initial_avatar.dart';
+import '../../state/wadee_controller.dart';
 import '../topics/topic_actions.dart';
-import '../topics/topic_detail_screen.dart';
 import 'person_form_screen.dart';
+import 'person_topic_detail_screen.dart';
 import 'topic_picker_screen.dart';
 
 class PersonDetailScreen extends StatelessWidget {
@@ -58,11 +59,52 @@ class PersonDetailScreen extends StatelessWidget {
         body: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
           children: [
-            Text('全般メモ', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 6),
-            Text(person.note.trim().isEmpty ? 'メモはありません。' : person.note),
-            const SizedBox(height: 28),
-            Text('割り当てた話題', style: Theme.of(context).textTheme.titleLarge),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    InitialAvatar(displayName: person.displayName, radius: 28),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            person.displayName,
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            '相手全般のメモ',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            person.note.trim().isEmpty
+                                ? '全般メモはありません。'
+                                : person.note,
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Text('この相手との話題', style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(width: 8),
+                Text(
+                  '${assigned.length}件',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ],
+            ),
             const SizedBox(height: 8),
             if (assigned.isEmpty)
               Card(
@@ -71,7 +113,7 @@ class PersonDetailScreen extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('まだ話題は割り当てられていません。'),
+                      const Text('この相手との話題はまだありません。'),
                       const SizedBox(height: 8),
                       const Text('話題を追加すると、この相手だけのメモを残せます。'),
                       const SizedBox(height: 12),
@@ -85,7 +127,10 @@ class PersonDetailScreen extends StatelessWidget {
                 ),
               ),
             ...assigned.map(
-              (item) => _PersonTopicCard(store: store, item: item),
+              (item) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _PersonTopicCard(store: store, item: item),
+              ),
             ),
           ],
         ),
@@ -136,122 +181,94 @@ class PersonDetailScreen extends StatelessWidget {
   }
 }
 
-class _PersonTopicCard extends StatefulWidget {
+class _PersonTopicCard extends StatelessWidget {
   const _PersonTopicCard({required this.store, required this.item});
 
   final WadeeController store;
   final PersonTopic item;
 
   @override
-  State<_PersonTopicCard> createState() => _PersonTopicCardState();
-}
-
-class _PersonTopicCardState extends State<_PersonTopicCard> {
-  @override
   Widget build(BuildContext context) {
-    final topic = widget.store.topicByIdIncludingArchived(widget.item.topicId);
+    final topic = store.topicByIdIncludingArchived(item.topicId);
     if (topic == null) return const SizedBox.shrink();
-    final archived = widget.store.isArchived(topic.id);
-    final note = widget.item.note.trim();
+    final archived = store.isArchived(topic.id);
     return Semantics(
       button: true,
-      label:
-          '${topic.title}${archived ? '、アーカイブ済み' : ''}${note.isEmpty ? '、相手ごとのメモなし' : '、相手ごとのメモあり'}',
+      label: '${topic.title}、${item.status.label}${archived ? '、アーカイブ済み' : ''}',
       child: Card(
-        child: ListTile(
-          title: Row(
-            children: [
-              Expanded(child: Text(topic.title)),
-              if (archived) const Chip(label: Text('アーカイブ済み')),
-            ],
-          ),
-          subtitle: Text(note.isEmpty ? 'この相手とのメモはありません。' : 'この相手とのメモ: $note'),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
           onTap: () => Navigator.of(context).push<void>(
             MaterialPageRoute(
-              builder: (_) =>
-                  TopicDetailScreen(store: widget.store, topicId: topic.id),
+              builder: (_) => PersonTopicDetailScreen(
+                store: store,
+                personId: item.personId,
+                topicId: item.topicId,
+              ),
             ),
           ),
-          trailing: PopupMenuButton<String>(
-            tooltip: 'この話題の操作',
-            onSelected: (value) {
-              if (value == 'note') {
-                _editNote();
-              } else {
-                _remove();
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'note', child: Text('この相手とのメモを編集')),
-              PopupMenuItem(value: 'remove', child: Text('割り当てを解除')),
-            ],
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        topic.title,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right),
+                  ],
+                ),
+                if (topic.description.trim().isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    topic.description,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      store.categoryName(topic.categoryId),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(_statusIcon(item.status), size: 16),
+                        const SizedBox(width: 4),
+                        Text(
+                          item.status.label,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                    if (archived)
+                      Text(
+                        'アーカイブ済み',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  Future<void> _editNote() async {
-    var value = widget.item.note;
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('この相手とのメモ'),
-        content: TextFormField(
-          initialValue: value,
-          minLines: 3,
-          maxLines: 6,
-          textInputAction: TextInputAction.newline,
-          autofocus: true,
-          onChanged: (newValue) => value = newValue,
-          decoration: const InputDecoration(labelText: 'メモ'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('キャンセル'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    if (saved != true || !mounted) return;
-    final success = await widget.store.updatePersonTopicNote(
-      personId: widget.item.personId,
-      topicId: widget.item.topicId,
-      note: value.trim(),
-    );
-    if (!success && mounted) showStoreError(context, widget.store);
-  }
-
-  Future<void> _remove() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('割り当てを解除しますか？'),
-        content: const Text('この相手とのメモも削除されます。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('キャンセル'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('解除する'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true &&
-        !await widget.store.removeTopicFromPerson(
-          personId: widget.item.personId,
-          topicId: widget.item.topicId,
-        ) &&
-        mounted) {
-      showStoreError(context, widget.store);
-    }
-  }
+  IconData _statusIcon(PersonTopicStatus status) => switch (status) {
+    PersonTopicStatus.planned => Icons.schedule_outlined,
+    PersonTopicStatus.discussed => Icons.check_circle_outline,
+    PersonTopicStatus.revisit => Icons.refresh_outlined,
+  };
 }

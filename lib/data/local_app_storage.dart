@@ -47,7 +47,7 @@ class LocalAppStorage {
   static const snapshotKey = 'wadee_app_data';
   static const customTopicsKey = 'custom_topics';
   static const favoriteIdsKey = 'favorite_topic_ids';
-  static const schemaVersion = 2;
+  static const schemaVersion = 3;
 
   Future<LocalAppData> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -123,7 +123,8 @@ class LocalAppStorage {
       if (version is! int) {
         throw const StorageFormatException('Invalid version');
       }
-      if (version == schemaVersion) return _parseV2(map);
+      if (version == schemaVersion) return _parseV3(map);
+      if (version == 2) return _parseV2(map);
       if (version == 1) return _parseV1(map);
       throw const StorageFormatException('Unsupported version');
     } on StorageFormatException {
@@ -133,7 +134,7 @@ class LocalAppStorage {
     }
   }
 
-  LocalAppData _parseV2(Map<String, dynamic> map) {
+  LocalAppData _parseV3(Map<String, dynamic> map) {
     final data = LocalAppData(
       customTopics: _parseCurrentTopics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
@@ -141,6 +142,19 @@ class LocalAppStorage {
       persons: _parsePersons(map['persons']),
       personTopics: _parsePersonTopics(map['personTopics']),
       needsMigration: false,
+    );
+    _validate(data);
+    return data;
+  }
+
+  LocalAppData _parseV2(Map<String, dynamic> map) {
+    final data = LocalAppData(
+      customTopics: _parseCurrentTopics(map['customTopics']),
+      favoriteIds: _parseIds(map['favoriteTopicIds']),
+      archivedIds: _parseIds(map['archivedTopicIds']),
+      persons: _parsePersons(map['persons']),
+      personTopics: _parseV2PersonTopics(map['personTopics']),
+      needsMigration: true,
     );
     _validate(data);
     return data;
@@ -178,6 +192,13 @@ class LocalAppStorage {
       _parseList<PersonTopic>(
         value,
         PersonTopic.fromJson,
+        'Invalid person topics',
+      );
+
+  List<PersonTopic> _parseV2PersonTopics(Object? value) =>
+      _parseList<PersonTopic>(
+        value,
+        PersonTopic.fromV2Json,
         'Invalid person topics',
       );
 
