@@ -10,6 +10,7 @@ const categories = <Category>[
   Category(id: 'daily', name: '日常'),
   Category(id: 'sports', name: 'スポーツ'),
   Category(id: 'learning', name: '学習'),
+  Category(id: 'beauty', name: '美容'),
   Category(id: 'other', name: 'その他'),
 ];
 

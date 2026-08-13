@@ -14,6 +14,7 @@ import 'package:wadai/features/people/topic_picker_screen.dart';
 import 'package:wadai/features/topics/topics_screen.dart';
 import 'package:wadai/features/topics/topic_detail_screen.dart';
 import 'package:wadai/features/topics/topic_tile.dart';
+import 'package:wadai/features/topics/category_icon.dart';
 import 'package:wadai/models/person.dart';
 import 'package:wadai/models/person_topic.dart';
 import 'package:wadai/models/topic.dart';
@@ -1393,6 +1394,8 @@ void main() {
     testWidgets('Topic picker filters by query and has distinct empty states', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(800, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final topic = custom(
         'pick',
         title: 'picker zebra',
@@ -1425,7 +1428,10 @@ void main() {
       await tester.pump();
       await tester.tap(find.byType(DropdownButtonFormField<String?>));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('その他').last);
+      final otherOption = find.text('その他').last;
+      await tester.ensureVisible(otherOption);
+      expect(otherOption, findsOneWidget);
+      await tester.tap(otherOption);
       await tester.pumpAndSettle();
       expect(find.text('picker alpha'), findsOneWidget);
       expect(find.text('picker zebra'), findsOneWidget);
@@ -1737,6 +1743,8 @@ void main() {
     testWidgets(
       'picker keeps selections across condition changes and shows count',
       (tester) async {
+        await tester.binding.setSurfaceSize(const Size(800, 900));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
         final person = Person(
           id: 'p',
           displayName: 'P',
@@ -1780,7 +1788,10 @@ void main() {
         expect(find.text('1件を追加'), findsOneWidget);
         await tester.tap(find.byType(DropdownButtonFormField<String?>));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('その他').last);
+        final otherOption = find.text('その他').last;
+        await tester.ensureVisible(otherOption);
+        expect(otherOption, findsOneWidget);
+        await tester.tap(otherOption);
         await tester.pumpAndSettle();
         await tester.tap(find.text('標準順'));
         await tester.pumpAndSettle();
@@ -2212,6 +2223,131 @@ void main() {
       await tester.tap(find.byTooltip('閉じる'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('美容カテゴリー', () {
+    testWidgets('話題フォームで美容を選択して保存し、再読み込み後も保持される', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final storage = MemoryStorage(appData());
+      final store = await ready(storage: storage);
+      await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+
+      await tester.tap(find.text('話題を作成'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField).first, '美容の話題');
+      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('美容').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('話題を保存する'));
+      await tester.pumpAndSettle();
+
+      expect(store.customTopics.single.categoryId, 'beauty');
+      final reloaded = await ready(storage: storage);
+      expect(reloaded.customTopics.single.categoryId, 'beauty');
+    });
+
+    testWidgets('話題検索と検索条件シートで美容カテゴリーに絞り込める', (tester) async {
+      final beauty = Topic(
+        id: 'beauty-topic',
+        title: '美容の話題',
+        categoryId: 'beauty',
+        description: '',
+        source: TopicSource.userCreated,
+        createdAt: DateTime.utc(2026),
+      );
+      final work = Topic(
+        id: 'work-topic',
+        title: '仕事の話題',
+        categoryId: 'work',
+        description: '',
+        source: TopicSource.userCreated,
+        createdAt: DateTime.utc(2026),
+      );
+      final store = await ready(
+        storage: MemoryStorage(appData(customTopics: <Topic>[beauty, work])),
+      );
+      await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+
+      final search = find.byType(TextField);
+      await tester.enterText(search, '美容');
+      await tester.pump();
+      expect(find.text(beauty.title), findsOneWidget);
+      expect(find.text(work.title), findsNothing);
+      await tester.tap(find.byTooltip('検索をクリア'));
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('絞り込みと並び替え'));
+      await tester.pumpAndSettle();
+      final beautyOption = find.widgetWithText(RadioListTile<String?>, '美容');
+      await tester.ensureVisible(beautyOption);
+      await tester.pumpAndSettle();
+      expect(beautyOption, findsOneWidget);
+      await tester.tap(beautyOption);
+      await tester.pump();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(FilledButton),
+          matching: find.textContaining('件を表示'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(beauty.title), findsOneWidget);
+      expect(find.text(work.title), findsNothing);
+    });
+
+    testWidgets('TopicPickerで美容カテゴリーを表示して絞り込める', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final person = Person(
+        id: 'beauty-picker-person',
+        displayName: 'P',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final beauty = Topic(
+        id: 'beauty-picker-topic',
+        title: '美容の話題',
+        categoryId: 'beauty',
+        description: '',
+        source: TopicSource.userCreated,
+        createdAt: DateTime.utc(2026),
+      );
+      final other = Topic(
+        id: 'other-picker-topic',
+        title: 'その他の話題',
+        categoryId: 'other',
+        description: '',
+        source: TopicSource.userCreated,
+        createdAt: DateTime.utc(2026),
+      );
+      final store = await ready(
+        storage: MemoryStorage(
+          appData(
+            customTopics: <Topic>[beauty, other],
+            persons: <Person>[person],
+          ),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TopicPickerScreen(store: store, personId: person.id),
+        ),
+      );
+      await tester.tap(find.byType(DropdownButtonFormField<String?>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('美容').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text(beauty.title), findsOneWidget);
+      expect(find.text(other.title), findsNothing);
+    });
+
+    test('美容カテゴリーは専用アイコンを返す', () {
+      expect(categoryIcon('beauty'), Icons.face_retouching_natural_outlined);
     });
   });
 }
