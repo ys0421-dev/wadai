@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wadai/app/app_theme.dart';
 import 'package:wadai/app/app_shell.dart';
 import 'package:wadai/app/wadai_app.dart';
 import 'package:wadai/data/topic_catalog.dart';
@@ -2161,6 +2162,328 @@ void main() {
         expect(find.text('Initial relation note'), findsOneWidget);
       },
     );
+
+    testWidgets(
+      'person detail separates statuses into synchronized tabs and preserves card semantics',
+      (tester) async {
+        final person = Person(
+          id: 'tab-person',
+          displayName: 'Tab person',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final planned = custom('tab-planned', title: 'Planned topic');
+        final plannedLater = custom(
+          'tab-planned-later',
+          title: 'Planned topic later',
+        );
+        final revisit = custom('tab-revisit', title: 'Revisit topic');
+        final discussed = custom('tab-discussed', title: 'Discussed topic');
+        final discussedLater = custom(
+          'tab-discussed-later',
+          title: 'Discussed topic later',
+        );
+        final store = await ready(
+          storage: MemoryStorage(
+            appData(
+              customTopics: <Topic>[
+                planned,
+                plannedLater,
+                revisit,
+                discussed,
+                discussedLater,
+              ],
+              persons: <Person>[person],
+              personTopics: <PersonTopic>[
+                PersonTopic(
+                  personId: person.id,
+                  topicId: planned.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026),
+                  status: PersonTopicStatus.planned,
+                ),
+                PersonTopic(
+                  personId: person.id,
+                  topicId: revisit.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026, 1, 2),
+                  status: PersonTopicStatus.revisit,
+                ),
+                PersonTopic(
+                  personId: person.id,
+                  topicId: plannedLater.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026, 1, 3),
+                  status: PersonTopicStatus.planned,
+                ),
+                PersonTopic(
+                  personId: person.id,
+                  topicId: discussed.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026, 1, 4),
+                  status: PersonTopicStatus.discussed,
+                ),
+                PersonTopic(
+                  personId: person.id,
+                  topicId: discussedLater.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026, 1, 5),
+                  status: PersonTopicStatus.discussed,
+                ),
+              ],
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: appTheme,
+            home: PersonDetailScreen(store: store, personId: person.id),
+          ),
+        );
+
+        expect(find.text('この相手との話題'), findsOneWidget);
+        expect(find.text('5件'), findsOneWidget);
+        expect(find.text('話す（3）'), findsOneWidget);
+        expect(find.text('話した（2）'), findsOneWidget);
+        expect(find.text(PersonTopicStatus.planned.label), findsNWidgets(3));
+        expect(find.text(PersonTopicStatus.revisit.label), findsNWidgets(2));
+        expect(find.text('Planned topic'), findsOneWidget);
+        expect(find.text('Planned topic later'), findsOneWidget);
+        expect(find.text('Revisit topic'), findsOneWidget);
+        expect(find.text('Discussed topic'), findsNothing);
+        expect(
+          tester.getTopLeft(find.text('Planned topic')).dy,
+          lessThan(tester.getTopLeft(find.text('Revisit topic')).dy),
+        );
+        expect(
+          tester.getTopLeft(find.text('Planned topic')).dy,
+          lessThan(tester.getTopLeft(find.text('Planned topic later')).dy),
+        );
+        expect(
+          tester.getTopLeft(find.text('Planned topic later')).dy,
+          lessThan(tester.getTopLeft(find.text('Revisit topic')).dy),
+        );
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label ==
+                    'Planned topic、${PersonTopicStatus.planned.label}、${store.categoryName(planned.categoryId)}',
+          ),
+          findsOneWidget,
+        );
+        final plannedCard = tester.widget<Card>(
+          find.ancestor(
+            of: find.text('Planned topic'),
+            matching: find.byType(Card),
+          ),
+        );
+        expect(plannedCard.color, plannedTopicContainerColor);
+        expect(
+          (plannedCard.shape as RoundedRectangleBorder).side.color,
+          plannedTopicOutlineColor,
+        );
+        final revisitCard = tester.widget<Card>(
+          find.ancestor(
+            of: find.text('Revisit topic'),
+            matching: find.byType(Card),
+          ),
+        );
+        expect(revisitCard.color, revisitTopicContainerColor);
+        expect(
+          (revisitCard.shape as RoundedRectangleBorder).side.color,
+          revisitTopicOutlineColor,
+        );
+        final tabBar = tester.widget<TabBar>(find.byType(TabBar));
+        expect(tabBar.labelColor, brandColor);
+        expect(tabBar.unselectedLabelColor, appSecondaryTextColor);
+        expect(tabBar.indicatorWeight, 3);
+
+        await tester.tap(find.text('話した（2）'));
+        await tester.pumpAndSettle();
+        expect(find.text('Discussed topic'), findsOneWidget);
+        expect(find.text('Discussed topic later'), findsOneWidget);
+        expect(
+          tester.getTopLeft(find.text('Discussed topic')).dy,
+          lessThan(tester.getTopLeft(find.text('Discussed topic later')).dy),
+        );
+        final discussedCard = tester.widget<Card>(
+          find.ancestor(
+            of: find.text('Discussed topic'),
+            matching: find.byType(Card),
+          ),
+        );
+        expect(discussedCard.color, discussedTopicContainerColor);
+        expect(
+          (discussedCard.shape as RoundedRectangleBorder).side.color,
+          discussedTopicOutlineColor,
+        );
+        expect(
+          DefaultTabController.of(tester.element(find.byType(TabBar))).index,
+          1,
+        );
+
+        await tester.fling(find.byType(TabBarView), const Offset(600, 0), 800);
+        await tester.pumpAndSettle();
+        expect(find.text('Planned topic'), findsOneWidget);
+        expect(
+          DefaultTabController.of(tester.element(find.byType(TabBar))).index,
+          0,
+        );
+        await tester.tap(find.text('Planned topic'));
+        await tester.pumpAndSettle();
+        expect(find.byType(PersonTopicDetailScreen), findsOneWidget);
+      },
+    );
+
+    testWidgets('person detail retains full and per-tab empty states', (
+      tester,
+    ) async {
+      final person = Person(
+        id: 'empty-person',
+        displayName: 'Empty person',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final emptyStore = await ready(
+        storage: MemoryStorage(appData(persons: <Person>[person])),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: PersonDetailScreen(store: emptyStore, personId: person.id),
+        ),
+      );
+      expect(find.byType(TabBar), findsNothing);
+      expect(find.text('この相手との話題はまだありません。'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, '話題を追加'), findsOneWidget);
+
+      final discussed = custom('only-discussed', title: 'Only discussed');
+      final store = await ready(
+        storage: MemoryStorage(
+          appData(
+            customTopics: <Topic>[discussed],
+            persons: <Person>[person],
+            personTopics: <PersonTopic>[
+              PersonTopic(
+                personId: person.id,
+                topicId: discussed.id,
+                note: '',
+                createdAt: DateTime.utc(2026),
+                status: PersonTopicStatus.discussed,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: PersonDetailScreen(store: store, personId: person.id),
+        ),
+      );
+      expect(find.text('これから話す話題はありません'), findsOneWidget);
+      expect(find.text('話した話題は「話した」タブで確認できます。'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, '話題を追加'), findsOneWidget);
+      await tester.tap(find.text('話した（1）'));
+      await tester.pumpAndSettle();
+      expect(find.text('話した話題はまだありません'), findsNothing);
+      expect(find.text('Only discussed'), findsOneWidget);
+
+      final planned = custom('only-planned', title: 'Only planned');
+      final revisit = custom('only-revisit', title: 'Only revisit');
+      final toTalkStore = await ready(
+        storage: MemoryStorage(
+          appData(
+            customTopics: <Topic>[planned, revisit],
+            persons: <Person>[person],
+            personTopics: <PersonTopic>[
+              PersonTopic(
+                personId: person.id,
+                topicId: planned.id,
+                note: '',
+                createdAt: DateTime.utc(2026),
+              ),
+              PersonTopic(
+                personId: person.id,
+                topicId: revisit.id,
+                note: '',
+                createdAt: DateTime.utc(2026, 1, 2),
+                status: PersonTopicStatus.revisit,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: PersonDetailScreen(store: toTalkStore, personId: person.id),
+        ),
+      );
+      await tester.tap(find.byType(Tab).last);
+      await tester.pumpAndSettle();
+      expect(find.text('話した話題はまだありません'), findsOneWidget);
+      expect(find.text('話題のステータスを「話した」にすると、ここに表示されます。'), findsOneWidget);
+      expect(find.byType(FilledButton), findsNothing);
+    });
+
+    testWidgets('person detail remains usable at 320px and 200% text scale', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final person = Person(
+        id: 'narrow-person',
+        displayName: 'Narrow person name',
+        note: 'A note that can wrap at a large text scale.',
+        createdAt: DateTime.utc(2026),
+      );
+      final topic = custom('narrow-person-topic', title: 'Narrow topic');
+      final store = await ready(
+        storage: MemoryStorage(
+          appData(
+            customTopics: <Topic>[topic],
+            persons: <Person>[person],
+            personTopics: <PersonTopic>[
+              PersonTopic(
+                personId: person.id,
+                topicId: topic.id,
+                note: '',
+                createdAt: DateTime.utc(2026),
+              ),
+            ],
+          ),
+        ),
+      );
+      Widget detailApp(TextScaler textScaler) => MaterialApp(
+        theme: appTheme,
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: child!,
+        ),
+        home: PersonDetailScreen(store: store, personId: person.id),
+      );
+      await tester.pumpWidget(detailApp(const TextScaler.linear(2)));
+      await tester.pumpAndSettle();
+      expect(
+        MediaQuery.textScalerOf(tester.element(find.byType(TabBar))),
+        const TextScaler.linear(2),
+      );
+      await tester.tap(find.byType(Tab).last);
+      await tester.pumpAndSettle();
+      expect(find.text('話した話題はまだありません'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(detailApp(const TextScaler.linear(0.8)));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getSize(find.byType(Tab).first).height,
+        greaterThanOrEqualTo(kMinInteractiveDimension),
+      );
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets(
       'filter draft dismisses, applies chips, clears one, and keeps search',
