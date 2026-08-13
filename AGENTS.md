@@ -142,6 +142,119 @@ Reviewerによる指摘事項は、最終判断のためメインエージェン
 
 ---
 
+## Git / GitHub ワークフロー
+
+GitHub Issueに基づいて実装作業を行う場合は、以下のGitワークフローに従ってください。
+
+### 基本原則
+
+* `main` ブランチへ直接実装・コミット・pushしてはいけません。
+* GitHub Issueごとに専用の作業ブランチを作成してください。
+* 実装、検証、修正、コミットはすべてその作業ブランチ上で行ってください。
+* 実装完了後は、`main` をbase branchとするPull Requestを作成してください。
+* 通常のタスクでは、エージェント自身がPull Requestをmergeしてはいけません。
+* Pull RequestがHuman Review可能な状態になった時点を、エージェントによる通常の実装作業の完了地点としてください。
+* GitHub側のBranch Rules / Rulesetを回避しようとしてはいけません。
+
+### Issueの処理開始
+
+GitHub Issueを実装する場合は、コードを変更する前に以下を行ってください。
+
+1. 対象Issueの内容、背景、要件、Acceptance Criteriaを確認する
+2. 関連する既存コードを調査する
+3. 最新の`main`を基点として、Issue専用の作業ブランチを作成する
+4. 作業ブランチへ移動してから実装を開始する
+
+ブランチ名は、Issueとの対応関係が分かる名前にしてください。
+
+原則として以下の形式を使用してください。
+
+`<type>/issue-<issue-number>-<short-description>`
+
+例:
+
+* `feature/issue-12-empty-state`
+* `fix/issue-15-search-bug`
+* `refactor/issue-20-topic-storage`
+
+`type`は変更内容に応じて、`feature`、`fix`、`refactor`など適切なものを選択してください。
+
+### 実装中
+
+* Issueに記載された要件とAcceptance Criteriaを作業の基準としてください。
+* Issueと無関係な変更を同じブランチへ含めないでください。
+* 必要性のないリファクタリングやフォーマット変更を混在させないでください。
+* 作業中にIssueの要件だけでは判断できない重要な仕様上の問題を発見した場合は、推測だけで大きな判断を行わず、必要に応じてユーザーへ確認してください。
+* サブエージェントを使用する場合も、最終的な変更は同じIssue用ブランチへ統合してください。
+
+### Commit
+
+実装および必要な検証が完了したら、変更をIssue用ブランチへcommitしてください。
+
+Commit messageは、変更内容が分かる簡潔なものにしてください。
+
+以下のものを意図せずcommitしてはいけません。
+
+* 認証情報
+* API Key
+* Secret
+* ローカル環境固有ファイル
+* 一時ファイル
+* 不要な生成ファイル
+
+### Pull Request
+
+Issueの実装および検証が完了したら、以下を行ってください。
+
+1. Issue用ブランチをGitHubへpushする
+2. `main` をbase branchとしてPull Requestを作成する
+3. Pull Request本文に変更内容をまとめる
+4. 実施した検証内容を記載する
+5. 対応するGitHub Issueをリンクする
+
+Issueを完全に解決するPull Requestでは、原則として以下を使用してください。
+
+`Closes #<issue-number>`
+
+Pull Request本文には最低限、以下を含めてください。
+
+* Summary
+* Main changes
+* Validation / Tests
+* Related Issue
+
+### Human Review
+
+Pull Requestを作成した後は、通常の実装タスクではそこで停止してください。
+
+エージェントは以下を行ってはいけません。
+
+* 自分自身でPull Requestをmergeする
+* `main`へ直接pushする
+* Pull Requestを経由せず変更を反映する
+* Branch Rules / Rulesetを無効化または回避する
+
+ユーザーまたはReviewerから修正指摘があった場合は、同じIssue用ブランチ上で修正し、既存のPull Requestを更新してください。
+
+### GitHub IssueベースのDefinition of Done
+
+GitHub Issueに基づく実装タスクは、以下を満たした時点でHuman Review可能とみなします。
+
+* Issueの要件が実装されている
+* Acceptance Criteriaを満たしている
+* 必要なコードフォーマットが実施されている
+* 関連する`flutter analyze`が成功している、または実行できなかった理由が説明されている
+* 関連するテストが成功している、または実行できなかった理由が説明されている
+* Issue専用ブランチへ変更がcommitされている
+* 作業ブランチがGitHubへpushされている
+* `main`向けのPull Requestが作成されている
+* Pull RequestとGitHub Issueがリンクされている
+* Pull RequestがHuman Review可能な状態になっている
+
+通常のIssue処理では、`main`へのmergeはDefinition of Doneに含めません。
+
+---
+
 ## アーキテクチャ方針
 
 シンプルで、明示的で、保守しやすいFlutterコードを優先してください。
