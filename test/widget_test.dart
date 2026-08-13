@@ -2055,6 +2055,52 @@ void main() {
       );
     });
 
+    testWidgets(
+      'detail keeps the remove action above the system bottom inset',
+      (tester) async {
+        const size = Size(320, 480);
+        const bottomInset = 24.0;
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final fixture = await detailFixture();
+        await tester.pumpWidget(
+          MediaQuery(
+            data: const MediaQueryData(
+              size: size,
+              padding: EdgeInsets.only(bottom: bottomInset),
+            ),
+            child: MaterialApp(
+              home: PersonTopicDetailScreen(
+                store: fixture.store,
+                personId: fixture.person.id,
+                topicId: fixture.topic.id,
+              ),
+            ),
+          ),
+        );
+
+        final removeAction = find.widgetWithText(OutlinedButton, 'この話題から外す');
+        await tester.scrollUntilVisible(removeAction, 100);
+        await tester.ensureVisible(removeAction);
+        await tester.pumpAndSettle();
+
+        final actionRect = tester.getRect(removeAction);
+        final listViewRect = tester.getRect(find.byType(ListView));
+        final scaffoldRect = tester.getRect(find.byType(Scaffold));
+        expect(
+          scaffoldRect.bottom - listViewRect.bottom,
+          closeTo(bottomInset, 0.01),
+        );
+        expect(
+          scaffoldRect.bottom - actionRect.bottom,
+          closeTo(bottomInset + 16, 0.01),
+        );
+      },
+    );
+
     testWidgets('detail keeps status and note unchanged when saving fails', (
       tester,
     ) async {
