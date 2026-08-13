@@ -18,6 +18,8 @@ IconData categoryIcon(String categoryId) {
       return Icons.sports_tennis_outlined;
     case 'learning':
       return Icons.menu_book_outlined;
+    case 'beauty':
+      return Icons.face_retouching_natural_outlined;
     default:
       return Icons.more_horiz;
   }
