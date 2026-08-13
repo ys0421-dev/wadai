@@ -10,6 +10,12 @@ const appOutlineVariantColor = Color(0xFFEEE9E4);
 const appTextColor = Color(0xFF2E2A27);
 const appSecondaryTextColor = Color(0xFF6D6560);
 const brandColor = Color(0xFFB9533B);
+const plannedTopicContainerColor = Color(0xFFEEF4D8);
+const plannedTopicOutlineColor = Color(0xFFD7E3AE);
+const revisitTopicContainerColor = Color(0xFFFFF4CC);
+const revisitTopicOutlineColor = Color(0xFFEBDCA4);
+const discussedTopicContainerColor = Color(0xFFF0EEEC);
+const discussedTopicOutlineColor = Color(0xFFDDD8D3);
 
 final appTheme = ThemeData(
   useMaterial3: true,

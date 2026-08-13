@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../app/app_theme.dart';
 import '../../models/person.dart';
 import '../../models/person_topic.dart';
 import '../../shared/widgets/empty_state.dart';
@@ -56,84 +57,17 @@ class PersonDetailScreen extends StatelessWidget {
           icon: const Icon(Icons.add),
           label: const Text('話題を追加'),
         ),
-        body: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-          children: [
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    InitialAvatar(displayName: person.displayName, radius: 28),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            person.displayName,
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            '相手全般のメモ',
-                            style: Theme.of(context).textTheme.labelLarge,
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            person.note.trim().isEmpty
-                                ? '全般メモはありません。'
-                                : person.note,
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+        body: assigned.isEmpty
+            ? _EmptyPersonTopicsBody(
+                person: person,
+                onAddTopic: () => _pickTopic(context, person.id),
+              )
+            : _PersonTopicsBody(
+                store: store,
+                person: person,
+                assigned: assigned,
+                onAddTopic: () => _pickTopic(context, person.id),
               ),
-            ),
-            const SizedBox(height: 24),
-            Row(
-              children: [
-                Text('この相手との話題', style: Theme.of(context).textTheme.titleLarge),
-                const SizedBox(width: 8),
-                Text(
-                  '${assigned.length}件',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (assigned.isEmpty)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('この相手との話題はまだありません。'),
-                      const SizedBox(height: 8),
-                      const Text('話題を追加すると、この相手だけのメモを残せます。'),
-                      const SizedBox(height: 12),
-                      FilledButton.icon(
-                        onPressed: () => _pickTopic(context, person.id),
-                        icon: const Icon(Icons.add),
-                        label: const Text('話題を追加'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ...assigned.map(
-              (item) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: _PersonTopicCard(store: store, item: item),
-              ),
-            ),
-          ],
-        ),
       );
     },
   );
@@ -181,6 +115,306 @@ class PersonDetailScreen extends StatelessWidget {
   }
 }
 
+class _EmptyPersonTopicsBody extends StatelessWidget {
+  const _EmptyPersonTopicsBody({
+    required this.person,
+    required this.onAddTopic,
+  });
+
+  final Person person;
+  final VoidCallback onAddTopic;
+
+  @override
+  Widget build(BuildContext context) => ListView(
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+    children: [
+      _PersonProfileCard(person: person),
+      const SizedBox(height: 24),
+      _TopicsHeading(count: 0),
+      const SizedBox(height: 8),
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('この相手との話題はまだありません。'),
+              const SizedBox(height: 8),
+              const Text('話題を追加すると、この相手だけのメモを残せます。'),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: onAddTopic,
+                icon: const Icon(Icons.add),
+                label: const Text('話題を追加'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+}
+
+class _PersonTopicsBody extends StatelessWidget {
+  const _PersonTopicsBody({
+    required this.store,
+    required this.person,
+    required this.assigned,
+    required this.onAddTopic,
+  });
+
+  final WadeeController store;
+  final Person person;
+  final List<PersonTopic> assigned;
+  final VoidCallback onAddTopic;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaledTabHeight =
+        kMinInteractiveDimension * MediaQuery.textScalerOf(context).scale(1);
+    final tabHeight = scaledTabHeight < kMinInteractiveDimension
+        ? kMinInteractiveDimension
+        : scaledTabHeight;
+    final toTalk = assigned
+        .where((item) => item.status != PersonTopicStatus.discussed)
+        .toList(growable: false);
+    final discussed = assigned
+        .where((item) => item.status == PersonTopicStatus.discussed)
+        .toList(growable: false);
+
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        children: [
+          Flexible(
+            fit: FlexFit.loose,
+            child: SingleChildScrollView(
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                    child: _PersonProfileCard(person: person),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
+                    child: _TopicsHeading(count: assigned.length),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          TabBar(
+            labelColor: brandColor,
+            unselectedLabelColor: appSecondaryTextColor,
+            indicatorColor: brandColor,
+            indicatorWeight: 3,
+            tabs: [
+              Tab(height: tabHeight, text: '話す（${toTalk.length}）'),
+              Tab(height: tabHeight, text: '話した（${discussed.length}）'),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                _TopicList(
+                  store: store,
+                  items: toTalk,
+                  emptyState: _ToTalkEmptyState(onAddTopic: onAddTopic),
+                  statuses: const [
+                    PersonTopicStatus.planned,
+                    PersonTopicStatus.revisit,
+                  ],
+                ),
+                _TopicList(
+                  store: store,
+                  items: discussed,
+                  emptyState: const _DiscussedEmptyState(),
+                  statuses: const [PersonTopicStatus.discussed],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PersonProfileCard extends StatelessWidget {
+  const _PersonProfileCard({required this.person});
+
+  final Person person;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InitialAvatar(displayName: person.displayName, radius: 28),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  person.displayName,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+                Text('相手全般のメモ', style: Theme.of(context).textTheme.labelLarge),
+                const SizedBox(height: 4),
+                Text(
+                  person.note.trim().isEmpty ? '全般メモはありません。' : person.note,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _TopicsHeading extends StatelessWidget {
+  const _TopicsHeading({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) => Wrap(
+    spacing: 8,
+    runSpacing: 4,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      Text('この相手との話題', style: Theme.of(context).textTheme.titleLarge),
+      Text('$count件', style: Theme.of(context).textTheme.bodyMedium),
+    ],
+  );
+}
+
+class _TopicList extends StatelessWidget {
+  const _TopicList({
+    required this.store,
+    required this.items,
+    required this.emptyState,
+    required this.statuses,
+  });
+
+  final WadeeController store;
+  final List<PersonTopic> items;
+  final Widget emptyState;
+  final List<PersonTopicStatus> statuses;
+
+  @override
+  Widget build(BuildContext context) {
+    if (items.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        children: [emptyState],
+      );
+    }
+    final groups = <Widget>[];
+    for (final status in statuses) {
+      final statusItems = items
+          .where((item) => item.status == status)
+          .toList(growable: false);
+      if (statusItems.isEmpty) {
+        continue;
+      }
+      if (groups.isNotEmpty) {
+        groups.add(const SizedBox(height: 16));
+      }
+      groups.add(
+        _StatusGroup(store: store, status: status, items: statusItems),
+      );
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+      children: groups,
+    );
+  }
+}
+
+class _StatusGroup extends StatelessWidget {
+  const _StatusGroup({
+    required this.store,
+    required this.status,
+    required this.items,
+  });
+
+  final WadeeController store;
+  final PersonTopicStatus status;
+  final List<PersonTopic> items;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        status.label,
+        key: ValueKey('status-group-${status.name}'),
+        style: Theme.of(context).textTheme.titleSmall,
+      ),
+      const SizedBox(height: 8),
+      ...items.map(
+        (item) => Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: _PersonTopicCard(store: store, item: item),
+        ),
+      ),
+    ],
+  );
+}
+
+class _ToTalkEmptyState extends StatelessWidget {
+  const _ToTalkEmptyState({required this.onAddTopic});
+
+  final VoidCallback onAddTopic;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('これから話す話題はありません'),
+          const SizedBox(height: 8),
+          const Text('話した話題は「話した」タブで確認できます。'),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: onAddTopic,
+            icon: const Icon(Icons.add),
+            label: const Text('話題を追加'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _DiscussedEmptyState extends StatelessWidget {
+  const _DiscussedEmptyState();
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: const Padding(
+      padding: EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('話した話題はまだありません'),
+          SizedBox(height: 8),
+          Text('話題のステータスを「話した」にすると、ここに表示されます。'),
+        ],
+      ),
+    ),
+  );
+}
+
 class _PersonTopicCard extends StatelessWidget {
   const _PersonTopicCard({required this.store, required this.item});
 
@@ -194,8 +428,14 @@ class _PersonTopicCard extends StatelessWidget {
     final archived = store.isArchived(topic.id);
     return Semantics(
       button: true,
-      label: '${topic.title}、${item.status.label}${archived ? '、アーカイブ済み' : ''}',
+      label:
+          '${topic.title}、${item.status.label}、${store.categoryName(topic.categoryId)}${archived ? '、アーカイブ済み' : ''}',
       child: Card(
+        color: _containerColor(item.status),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: _outlineColor(item.status)),
+        ),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
           onTap: () => Navigator.of(context).push<void>(
@@ -270,5 +510,17 @@ class _PersonTopicCard extends StatelessWidget {
     PersonTopicStatus.planned => Icons.schedule_outlined,
     PersonTopicStatus.discussed => Icons.check_circle_outline,
     PersonTopicStatus.revisit => Icons.refresh_outlined,
+  };
+
+  Color _containerColor(PersonTopicStatus status) => switch (status) {
+    PersonTopicStatus.planned => plannedTopicContainerColor,
+    PersonTopicStatus.revisit => revisitTopicContainerColor,
+    PersonTopicStatus.discussed => discussedTopicContainerColor,
+  };
+
+  Color _outlineColor(PersonTopicStatus status) => switch (status) {
+    PersonTopicStatus.planned => plannedTopicOutlineColor,
+    PersonTopicStatus.revisit => revisitTopicOutlineColor,
+    PersonTopicStatus.discussed => discussedTopicOutlineColor,
   };
 }
