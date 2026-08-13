@@ -220,12 +220,16 @@ class _PersonTopicsBody extends StatelessWidget {
                   store: store,
                   items: toTalk,
                   emptyState: _ToTalkEmptyState(onAddTopic: onAddTopic),
-                  grouped: true,
+                  statuses: const [
+                    PersonTopicStatus.planned,
+                    PersonTopicStatus.revisit,
+                  ],
                 ),
                 _TopicList(
                   store: store,
                   items: discussed,
                   emptyState: const _DiscussedEmptyState(),
+                  statuses: const [PersonTopicStatus.discussed],
                 ),
               ],
             ),
@@ -296,13 +300,13 @@ class _TopicList extends StatelessWidget {
     required this.store,
     required this.items,
     required this.emptyState,
-    this.grouped = false,
+    required this.statuses,
   });
 
   final WadeeController store;
   final List<PersonTopic> items;
   final Widget emptyState;
-  final bool grouped;
+  final List<PersonTopicStatus> statuses;
 
   @override
   Widget build(BuildContext context) {
@@ -312,38 +316,24 @@ class _TopicList extends StatelessWidget {
         children: [emptyState],
       );
     }
-    final planned = items
-        .where((item) => item.status == PersonTopicStatus.planned)
-        .toList(growable: false);
-    final revisit = items
-        .where((item) => item.status == PersonTopicStatus.revisit)
-        .toList(growable: false);
+    final groups = <Widget>[];
+    for (final status in statuses) {
+      final statusItems = items
+          .where((item) => item.status == status)
+          .toList(growable: false);
+      if (statusItems.isEmpty) {
+        continue;
+      }
+      if (groups.isNotEmpty) {
+        groups.add(const SizedBox(height: 16));
+      }
+      groups.add(
+        _StatusGroup(store: store, status: status, items: statusItems),
+      );
+    }
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-      children: [
-        if (grouped) ...[
-          if (planned.isNotEmpty) ...[
-            _StatusGroup(
-              store: store,
-              status: PersonTopicStatus.planned,
-              items: planned,
-            ),
-            if (revisit.isNotEmpty) const SizedBox(height: 16),
-          ],
-          if (revisit.isNotEmpty)
-            _StatusGroup(
-              store: store,
-              status: PersonTopicStatus.revisit,
-              items: revisit,
-            ),
-        ] else
-          ...items.map(
-            (item) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: _PersonTopicCard(store: store, item: item),
-            ),
-          ),
-      ],
+      children: groups,
     );
   }
 }
@@ -363,7 +353,11 @@ class _StatusGroup extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(status.label, style: Theme.of(context).textTheme.titleSmall),
+      Text(
+        status.label,
+        key: ValueKey('status-group-${status.name}'),
+        style: Theme.of(context).textTheme.titleSmall,
+      ),
       const SizedBox(height: 8),
       ...items.map(
         (item) => Padding(

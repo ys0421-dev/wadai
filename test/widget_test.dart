@@ -2302,8 +2302,24 @@ void main() {
 
         await tester.tap(find.text('話した（2）'));
         await tester.pumpAndSettle();
+        final discussedGroupLabel = find.byKey(
+          const ValueKey('status-group-discussed'),
+        );
+        expect(discussedGroupLabel, findsOneWidget);
+        expect(
+          tester.widget<Text>(discussedGroupLabel).data,
+          PersonTopicStatus.discussed.label,
+        );
         expect(find.text('Discussed topic'), findsOneWidget);
         expect(find.text('Discussed topic later'), findsOneWidget);
+        expect(
+          tester.getTopLeft(discussedGroupLabel).dy,
+          lessThan(tester.getTopLeft(find.text('Discussed topic')).dy),
+        );
+        expect(
+          tester.getTopLeft(discussedGroupLabel).dy,
+          lessThan(tester.getTopLeft(find.text('Discussed topic later')).dy),
+        );
         expect(
           tester.getTopLeft(find.text('Discussed topic')).dy,
           lessThan(tester.getTopLeft(find.text('Discussed topic later')).dy),
