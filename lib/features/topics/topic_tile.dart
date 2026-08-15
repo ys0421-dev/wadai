@@ -98,7 +98,10 @@ class TopicTile extends StatelessWidget {
                       fontSize: 13,
                     ),
                   ),
-                  if (topic.isCustom) const _SmallLabel(text: '自作'),
+                  if (topic.source == TopicSource.userCreated)
+                    const _SmallLabel(text: '自作'),
+                  if (topic.source == TopicSource.aiGenerated)
+                    const _SmallLabel(text: 'AI提案'),
                   if (archived) const _SmallLabel(text: 'アーカイブ済み'),
                 ],
               ),
