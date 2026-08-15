@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../app/app_theme.dart';
 import '../../models/person.dart';
 import '../../models/person_topic.dart';
+import '../../models/topic.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/initial_avatar.dart';
 import '../../state/wadee_controller.dart';
@@ -551,6 +552,16 @@ class _PersonTopicCard extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (topic.scope == TopicScope.person)
+                      Text(
+                        'この相手専用',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    if (topic.source == TopicSource.aiGenerated)
+                      Text(
+                        'AI提案',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     if (archived)
                       Text(
                         'アーカイブ済み',

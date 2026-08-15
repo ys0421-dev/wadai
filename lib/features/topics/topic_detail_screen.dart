@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../app/app_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../state/wadee_controller.dart';
+import '../../models/topic.dart';
 import 'category_icon.dart';
 import 'topic_actions.dart';
 import 'topic_form_screen.dart';
@@ -79,6 +80,20 @@ class TopicDetailScreen extends StatelessWidget {
                   color: appTextColor,
                 ),
               ),
+              if (topic.scope == TopicScope.person ||
+                  topic.source == TopicSource.aiGenerated) ...[
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    if (topic.scope == TopicScope.person)
+                      const Chip(label: Text('この相手専用')),
+                    if (topic.source == TopicSource.aiGenerated)
+                      const Chip(label: Text('AI提案')),
+                  ],
+                ),
+              ],
               if (archived) ...[
                 const SizedBox(height: 10),
                 const Chip(label: Text('アーカイブ済み')),
@@ -178,21 +193,27 @@ class TopicDetailScreen extends StatelessWidget {
                   style: const TextStyle(height: 1.65, fontSize: 16),
                 ),
               ],
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: archived ? null : () => _toggle(context, topic.id),
-                  icon: Icon(favorite ? Icons.favorite : Icons.favorite_border),
-                  label: Text(favorite ? 'お気に入りから解除' : 'お気に入りに追加'),
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(54),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(17),
+              if (topic.scope == TopicScope.global) ...[
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: archived
+                        ? null
+                        : () => _toggle(context, topic.id),
+                    icon: Icon(
+                      favorite ? Icons.favorite : Icons.favorite_border,
+                    ),
+                    label: Text(favorite ? 'お気に入りから解除' : 'お気に入りに追加'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(54),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(17),
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ],
             ],
           ),
         ),

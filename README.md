@@ -39,6 +39,13 @@ WADEEは、相手ごとに会話の話題とメモを整理するFlutterアプ�
 
 ## データモデル
 
+### 相手専用の話題
+
+- `Topic` は `scope`（`global` / `person`）と、相手専用時の `ownerPersonId` を持ちます。種別は定番・自作・AI提案を区別します。
+- 相手専用のAI提案は所有者の詳細でのみ表示され、話題一覧や他の相手のPickerには表示されません。お気に入りにはできません。
+- 相手専用話題は「共通の話題にする」で昇格できます。関連の解除または所有者削除では、本体・関連・お気に入り／Archive参照を原子的に削除します。
+- タイトルと最初のひとことの正規化後の完全一致は、global全体と同じ相手の専用話題内で重複作成できません。
+
 - `Person`: 相手の名前、全般メモ、作成日時、任意の`PersonProfile`
 - `PersonProfile`: 関係性・親密度・年代と、相手について／会話のヒントを表す構造化プロフィール。名前だけの登録も可能
 - `Topic`: 複数の相手で再利用できる会話ユニット。タイトル、カテゴリ、最初のひとこと、話を広げるヒント、メモと定番／自作の種別を持つ
@@ -48,11 +55,14 @@ WADEEは、相手ごとに会話の話題とメモを整理するFlutterアプ�
 
 ## データ保存
 
+- 現行schemaはv6です。v1〜v5をv6へ移行し、v5までのTopicはglobal scope・ownerなしへ補完します。v4以前の`description`はTopicメモとして保持します。
+- 相手専用Topicのarchive、PersonTopicのstatus・メモは移行後も保持されます。
+
 データは`shared_preferences`を使用して端末内へ保存します。
 
 - schema version付きの単一スナップショット
 - 保存成功後にのみ画面上の状態を更新
-- 旧保存形式およびschema v1〜v4からschema v5へのMigration
+- 旧保存形式およびschema v1〜v5からschema v6へのMigration
 - schema v4以前のTopicの説明文はメモとして保持し、最初のひとことと空のヒントを補完
 - schema v2／v3のPersonには空の`PersonProfile`を補い、既存のメモ・話題ステータス・お気に入り・Archive状態を維持
 - 未知のschema versionや壊れたデータを検出した場合は、既存データを上書きせずエラーを表示

@@ -21,6 +21,7 @@ import 'package:wadai/features/topics/category_icon.dart';
 import 'package:wadai/models/person.dart';
 import 'package:wadai/models/person_topic.dart';
 import 'package:wadai/models/topic.dart';
+import 'package:wadai/models/topic_draft.dart';
 import 'package:wadai/state/wadee_controller.dart';
 
 class MemoryStorage extends LocalAppStorage {
@@ -243,7 +244,7 @@ void main() {
         final snapshot =
             jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
                 as Map<String, dynamic>;
-        expect(snapshot['schemaVersion'], 5);
+        expect(snapshot['schemaVersion'], 6);
         expect(store.personById('legacy-person')!.profile.isEmpty, isTrue);
         expect(
           store.personTopic('legacy-person', topic.id)!.status,
@@ -253,7 +254,7 @@ void main() {
       },
     );
 
-    test('v5 snapshot roundtrip preserves every profile field', () async {
+    test('v6 snapshot roundtrip preserves every profile field', () async {
       const profile = PersonProfile(
         relationship: PersonRelationship.supervisor,
         closeness: PersonCloseness.close,
@@ -428,7 +429,7 @@ void main() {
         jsonDecode(
           prefs.getString(LocalAppStorage.snapshotKey)!,
         )['schemaVersion'],
-        5,
+        6,
       );
       expect(store.isFavorite('old'), isTrue);
       expect(store.isFavorite(builtin.id), isTrue);
@@ -532,7 +533,7 @@ void main() {
         final snapshot =
             jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
                 as Map<String, dynamic>;
-        expect(snapshot['schemaVersion'], 5);
+        expect(snapshot['schemaVersion'], 6);
         expect(
           (snapshot['personTopics'] as List<dynamic>).single['status'],
           'planned',
@@ -798,7 +799,7 @@ void main() {
     );
 
     test(
-      'v4 snapshot migrates all topic, person and relation state to v5',
+      'v4 snapshot migrates all topic, person and relation state to v6',
       () async {
         const profile = PersonProfile(
           relationship: PersonRelationship.family,
@@ -865,7 +866,7 @@ void main() {
         final saved =
             jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
                 as Map<String, dynamic>;
-        expect(saved['schemaVersion'], 5);
+        expect(saved['schemaVersion'], 6);
         final savedTopic = (saved['customTopics'] as List).single as Map;
         expect(savedTopic['note'], '以前の説明');
         expect(savedTopic['openingQuestion'], '「前の話題」について、どう思いますか？');
@@ -1259,7 +1260,7 @@ void main() {
       expect(find.byType(NavigationBar), findsOneWidget);
     });
 
-    testWidgets('form creates, v5 saves, edit keeps the topic and reloads', (
+    testWidgets('form creates, v6 saves, edit keeps the topic and reloads', (
       tester,
     ) async {
       final store = await ready();
@@ -2112,7 +2113,7 @@ void main() {
         await tester.tap(find.text('残したい話題'));
         await tester.pumpAndSettle();
         expect(find.textContaining('個別のメモ'), findsOneWidget);
-        await tester.tap(find.text('話題ライブラリを開く'));
+        await tester.tap(find.text('話題の詳細を開く'));
         await tester.pumpAndSettle();
         expect(find.text('この話題は通常の一覧から非表示です。お気に入りの変更はできません。'), findsOneWidget);
         expect(find.text('復元する'), findsOneWidget);
@@ -3257,9 +3258,726 @@ void main() {
       expect(find.text(beauty.title), findsOneWidget);
       expect(find.text(other.title), findsNothing);
     });
+  });
 
-    test('美容カテゴリーは専用アイコンを返す', () {
-      expect(categoryIcon('beauty'), Icons.face_retouching_natural_outlined);
+  group('Issue 14 person-scoped topics', () {
+    Future<
+      ({MemoryStorage storage, WadeeController store, Person alice, Person bob})
+    >
+    scopeStore() async {
+      final alice = Person(
+        id: 'alice',
+        displayName: 'Alice',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final bob = Person(
+        id: 'bob',
+        displayName: 'Bob',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final storage = MemoryStorage(appData(persons: <Person>[alice, bob]));
+      return (
+        storage: storage,
+        store: await ready(storage: storage),
+        alice: alice,
+        bob: bob,
+      );
+    }
+
+    test(
+      'v5 snapshot migrates topics to global scope and resaves as v6',
+      () async {
+        final topic = custom(
+          'v5-global',
+          title: 'v5 title',
+          openingQuestion: 'v5 opening',
+        );
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          LocalAppStorage.snapshotKey: jsonEncode(<String, Object>{
+            'schemaVersion': 5,
+            'customTopics': <Object>[
+              topic.toJson()
+                ..remove('scope')
+                ..remove('ownerPersonId'),
+            ],
+            'favoriteTopicIds': <String>[topic.id],
+            'archivedTopicIds': <String>[],
+            'persons': <Object>[],
+            'personTopics': <Object>[],
+          }),
+        });
+        final store = await ready();
+        final restored = store.topicByIdIncludingArchived(topic.id)!;
+        expect(restored.scope, TopicScope.global);
+        expect(restored.ownerPersonId, isNull);
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          jsonDecode(
+            prefs.getString(LocalAppStorage.snapshotKey)!,
+          )['schemaVersion'],
+          6,
+        );
+      },
+    );
+
+    test('AI batch is atomic, private, and can be promoted', () async {
+      final fixture = await scopeStore();
+      final ids = await fixture.store.addAiGeneratedTopicsToPerson(
+        fixture.alice.id,
+        <TopicDraft>[
+          TopicDraft(
+            title: '  Private  ',
+            categoryId: 'work',
+            openingQuestion: '  What changed? ',
+            talkingPoints: <String>[' one ', ' ', 'two'],
+          ),
+        ],
+      );
+      expect(ids, hasLength(1));
+      final topic = fixture.store.topicByIdIncludingArchived(ids!.single)!;
+      expect(topic.source, TopicSource.aiGenerated);
+      expect(topic.isCustom, isFalse);
+      expect(topic.scope, TopicScope.person);
+      expect(topic.ownerPersonId, fixture.alice.id);
+      expect(topic.talkingPoints, <String>['one', 'two']);
+      expect(
+        fixture.store.topics.map((item) => item.id),
+        isNot(contains(topic.id)),
+      );
+      expect(fixture.store.customTopics, isNot(contains(topic)));
+      expect(
+        await fixture.store.assignTopicToPerson(
+          personId: fixture.bob.id,
+          topicId: topic.id,
+        ),
+        isFalse,
+      );
+      expect(await fixture.store.toggleFavorite(topic.id), isFalse);
+      expect(await fixture.store.promotePersonTopicToGlobal(topic.id), isTrue);
+      expect(
+        fixture.store.topicByIdIncludingArchived(topic.id)!.scope,
+        TopicScope.global,
+      );
+      expect(fixture.store.topics.map((item) => item.id), contains(topic.id));
+      expect(
+        fixture.store.customTopics.map((item) => item.id),
+        isNot(contains(topic.id)),
+      );
+      expect(
+        await fixture.store.assignTopicToPerson(
+          personId: fixture.bob.id,
+          topicId: topic.id,
+        ),
+        isTrue,
+      );
+    });
+
+    test(
+      'AI duplicate batches and promotion duplicates are rejected',
+      () async {
+        final fixture = await scopeStore();
+        expect(
+          await fixture.store.addTopic(
+            title: 'Same  title',
+            categoryId: 'work',
+            openingQuestion: 'Same question',
+          ),
+          isTrue,
+        );
+        expect(
+          await fixture.store
+              .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+                TopicDraft(
+                  title: ' same title ',
+                  categoryId: 'work',
+                  openingQuestion: 'same   question',
+                ),
+              ]),
+          isNull,
+        );
+        final created = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: 'Private',
+                categoryId: 'work',
+                openingQuestion: 'Question',
+              ),
+            ]);
+        expect(created, isNotNull);
+        expect(
+          await fixture.store.addTopic(
+            title: 'private',
+            categoryId: 'work',
+            openingQuestion: 'question',
+          ),
+          isTrue,
+        );
+        expect(
+          await fixture.store.promotePersonTopicToGlobal(created!.single),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'removing or deleting an owner cascades private topic state',
+      () async {
+        final fixture = await scopeStore();
+        final ids = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: 'Private',
+                categoryId: 'work',
+                openingQuestion: 'Question',
+              ),
+            ]);
+        final id = ids!.single;
+        expect(await fixture.store.archiveTopic(id), isTrue);
+        expect(
+          await fixture.store.removeTopicFromPerson(
+            personId: fixture.alice.id,
+            topicId: id,
+          ),
+          isTrue,
+        );
+        expect(fixture.store.topicByIdIncludingArchived(id), isNull);
+        expect(fixture.store.isArchived(id), isFalse);
+
+        final second = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: 'Private 2',
+                categoryId: 'work',
+                openingQuestion: 'Question 2',
+              ),
+            ]);
+        expect(await fixture.store.deletePerson(fixture.alice.id), isTrue);
+        expect(
+          fixture.store.topicByIdIncludingArchived(second!.single),
+          isNull,
+        );
+      },
+    );
+
+    test('AI batch validates atomically and writes exactly once', () async {
+      final fixture = await scopeStore();
+      final ids = await fixture.store
+          .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+            TopicDraft(title: 'One', categoryId: 'work', openingQuestion: 'Q1'),
+            TopicDraft(title: 'Two', categoryId: 'work', openingQuestion: 'Q2'),
+          ]);
+      expect(ids, hasLength(2));
+      expect(ids!.toSet(), hasLength(2));
+      expect(fixture.storage.saveCalls, 1);
+      final relations = fixture.store.personTopicsFor(fixture.alice.id);
+      expect(relations, hasLength(2));
+      expect(
+        relations.every((item) => item.status == PersonTopicStatus.planned),
+        isTrue,
+      );
+
+      final invalidDrafts = <List<TopicDraft>>[
+        <TopicDraft>[
+          TopicDraft(title: '', categoryId: 'work', openingQuestion: 'Q'),
+        ],
+        <TopicDraft>[
+          TopicDraft(title: 'T', categoryId: 'work', openingQuestion: ''),
+        ],
+        <TopicDraft>[
+          TopicDraft(title: 'T', categoryId: 'unknown', openingQuestion: 'Q'),
+        ],
+        <TopicDraft>[
+          TopicDraft(
+            title: ' Same ',
+            categoryId: 'work',
+            openingQuestion: ' Q ',
+          ),
+          TopicDraft(title: 'same', categoryId: 'work', openingQuestion: 'q'),
+        ],
+      ];
+      for (final drafts in invalidDrafts) {
+        final fresh = await scopeStore();
+        expect(
+          await fresh.store.addAiGeneratedTopicsToPerson(
+            fresh.alice.id,
+            drafts,
+          ),
+          isNull,
+        );
+        expect(fresh.storage.saveCalls, 0);
+        expect(fresh.store.personTopics, isEmpty);
+      }
+
+      final failingStorage = MemoryStorage(
+        appData(persons: <Person>[fixture.alice]),
+        failSaves: true,
+      );
+      final failingStore = await ready(storage: failingStorage);
+      expect(
+        await failingStore.addAiGeneratedTopicsToPerson(
+          fixture.alice.id,
+          <TopicDraft>[
+            TopicDraft(title: 'Fail', categoryId: 'work', openingQuestion: 'Q'),
+          ],
+        ),
+        isNull,
+      );
+      expect(failingStorage.saveCalls, 1);
+      expect(failingStore.personTopics, isEmpty);
+      expect(
+        failingStore.allTopicsIncludingArchived.where(
+          (topic) => topic.id.startsWith('ai-'),
+        ),
+        isEmpty,
+      );
+    });
+
+    test(
+      'promotion preserves relation and archive, then survives owner deletion',
+      () async {
+        final fixture = await scopeStore();
+        final id = (await fixture.store.addAiGeneratedTopicsToPerson(
+          fixture.alice.id,
+          <TopicDraft>[
+            TopicDraft(
+              title: 'Promote',
+              categoryId: 'work',
+              openingQuestion: 'Q',
+            ),
+          ],
+        ))!.single;
+        expect(
+          await fixture.store.updatePersonTopicNote(
+            personId: fixture.alice.id,
+            topicId: id,
+            note: 'Keep',
+          ),
+          isTrue,
+        );
+        expect(
+          await fixture.store.updatePersonTopicStatus(
+            personId: fixture.alice.id,
+            topicId: id,
+            status: PersonTopicStatus.revisit,
+          ),
+          isTrue,
+        );
+        expect(await fixture.store.archiveTopic(id), isTrue);
+        expect(await fixture.store.promotePersonTopicToGlobal(id), isTrue);
+        final promoted = fixture.store.topicByIdIncludingArchived(id)!;
+        expect(promoted.scope, TopicScope.global);
+        expect(promoted.ownerPersonId, isNull);
+        expect(promoted.source, TopicSource.aiGenerated);
+        expect(fixture.store.isArchived(id), isTrue);
+        final aliceRelation = fixture.store.personTopic(fixture.alice.id, id)!;
+        expect(aliceRelation.note, 'Keep');
+        expect(aliceRelation.status, PersonTopicStatus.revisit);
+        expect(await fixture.store.restoreTopic(id), isTrue);
+        expect(
+          await fixture.store.assignTopicToPerson(
+            personId: fixture.bob.id,
+            topicId: id,
+          ),
+          isTrue,
+        );
+        expect(await fixture.store.deletePerson(fixture.alice.id), isTrue);
+        expect(fixture.store.topicByIdIncludingArchived(id), isNotNull);
+        expect(fixture.store.personTopic(fixture.alice.id, id), isNull);
+        expect(fixture.store.personTopic(fixture.bob.id, id), isNotNull);
+      },
+    );
+    test(
+      'same normalized person draft is allowed for another owner only',
+      () async {
+        final fixture = await scopeStore();
+        final aliceIds = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: '  Shared   private ',
+                categoryId: 'work',
+                openingQuestion: ' Same   opening ',
+              ),
+            ]);
+        final bobIds = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.bob.id, <TopicDraft>[
+              TopicDraft(
+                title: 'shared private',
+                categoryId: 'work',
+                openingQuestion: 'same opening',
+              ),
+            ]);
+        expect(aliceIds, hasLength(1));
+        expect(bobIds, hasLength(1));
+        expect(aliceIds!.single, isNot(bobIds!.single));
+        expect(fixture.store.personTopicsFor(fixture.alice.id), hasLength(1));
+        expect(fixture.store.personTopicsFor(fixture.bob.id), hasLength(1));
+        expect(
+          await fixture.store
+              .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+                TopicDraft(
+                  title: 'shared private',
+                  categoryId: 'work',
+                  openingQuestion: 'same opening',
+                ),
+              ]),
+          isNull,
+        );
+      },
+    );
+
+    testWidgets(
+      'Bob picker hides private AI, shows promoted AI, but not in mine',
+      (tester) async {
+        final fixture = await scopeStore();
+        final privateId = (await fixture.store.addAiGeneratedTopicsToPerson(
+          fixture.alice.id,
+          <TopicDraft>[
+            TopicDraft(
+              title: 'Private AI for Bob',
+              categoryId: 'work',
+              openingQuestion: 'Question',
+            ),
+          ],
+        ))!.single;
+        expect(
+          await fixture.store.addTopic(
+            title: 'Bob manual topic',
+            categoryId: 'work',
+            openingQuestion: 'Manual question',
+          ),
+          isTrue,
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(
+              store: fixture.store,
+              personId: fixture.bob.id,
+            ),
+          ),
+        );
+        await tester.enterText(find.byType(TextField), 'Private AI for Bob');
+        await tester.pumpAndSettle();
+        final privateCard = find.ancestor(
+          of: find.text('Private AI for Bob'),
+          matching: find.byType(Card),
+        );
+        expect(privateCard, findsNothing);
+        expect(
+          await fixture.store.promotePersonTopicToGlobal(privateId),
+          isTrue,
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(
+              store: fixture.store,
+              personId: fixture.bob.id,
+            ),
+          ),
+        );
+        await tester.enterText(find.byType(TextField), 'Private AI for Bob');
+        await tester.pumpAndSettle();
+        expect(privateCard, findsOneWidget);
+        await tester.tap(find.text('自作').last);
+        await tester.pumpAndSettle();
+        expect(privateCard, findsNothing);
+        await tester.enterText(find.byType(TextField), 'Bob manual topic');
+        await tester.pumpAndSettle();
+        expect(
+          find.ancestor(
+            of: find.text('Bob manual topic'),
+            matching: find.byType(Card),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+  });
+
+  test('美容カテゴリーは専用アイコンを返す', () {
+    expect(categoryIcon('beauty'), Icons.face_retouching_natural_outlined);
+  });
+
+  group('Issue 14 storage validation', () {
+    Map<String, Object?> rawV6({
+      required Map<String, dynamic> topic,
+      List<Map<String, dynamic>> persons = const <Map<String, dynamic>>[],
+      List<Map<String, dynamic>> relations = const <Map<String, dynamic>>[],
+      List<String> favorites = const <String>[],
+    }) => <String, Object?>{
+      'schemaVersion': 6,
+      'customTopics': <Map<String, dynamic>>[topic],
+      'favoriteTopicIds': favorites,
+      'archivedTopicIds': <String>[],
+      'persons': persons,
+      'personTopics': relations,
+    };
+
+    test(
+      'rejects invalid v6 owner and relation combinations without overwrite',
+      () async {
+        final person = Person(
+          id: 'owner',
+          displayName: 'Owner',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final private = Topic(
+          id: 'private',
+          title: 'Private',
+          categoryId: 'work',
+          openingQuestion: 'Question',
+          source: TopicSource.aiGenerated,
+          scope: TopicScope.person,
+          ownerPersonId: person.id,
+        );
+        final relation = PersonTopic(
+          personId: person.id,
+          topicId: private.id,
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final bob = Person(
+          id: 'bob',
+          displayName: 'Bob',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final bobRelation = PersonTopic(
+          personId: bob.id,
+          topicId: private.id,
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final cases = <Map<String, Object?>>[
+          rawV6(
+            topic: <String, dynamic>{
+              ...private.toJson(),
+              'ownerPersonId': 'missing',
+            },
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson()],
+          ),
+          rawV6(
+            topic: <String, dynamic>{
+              ...private.toJson(),
+              'ownerPersonId': null,
+            },
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: <String, dynamic>{...private.toJson(), 'ownerPersonId': ''},
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: <String, dynamic>{...private.toJson(), 'scope': 'global'},
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson(), bob.toJson()],
+            relations: <Map<String, dynamic>>[bobRelation.toJson()],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson(), bob.toJson()],
+            relations: <Map<String, dynamic>>[
+              relation.toJson(),
+              bobRelation.toJson(),
+            ],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+            favorites: <String>[private.id],
+          ),
+          rawV6(
+            topic: Topic(
+              id: 'builtin-copy',
+              title: 'Bad',
+              categoryId: 'work',
+              openingQuestion: 'Bad?',
+              source: TopicSource.builtIn,
+            ).toJson(),
+          ),
+        ];
+        for (final snapshot in cases) {
+          final raw = jsonEncode(snapshot);
+          SharedPreferences.setMockInitialValues(<String, Object>{
+            LocalAppStorage.snapshotKey: raw,
+          });
+          await expectLater(
+            LocalAppStorage().load(),
+            throwsA(isA<StorageFormatException>()),
+          );
+          final prefs = await SharedPreferences.getInstance();
+          expect(prefs.getString(LocalAppStorage.snapshotKey), raw);
+        }
+      },
+    );
+
+    test('v4 and v5 reject aiGenerated source', () async {
+      final v5 = <String, Object>{
+        'schemaVersion': 5,
+        'customTopics': <Object>[
+          <String, Object?>{
+            'id': 'ai',
+            'title': 'AI',
+            'categoryId': 'work',
+            'openingQuestion': 'Question',
+            'talkingPoints': <String>[],
+            'note': '',
+            'source': 'aiGenerated',
+            'createdAt': null,
+          },
+        ],
+        'favoriteTopicIds': <String>[],
+        'archivedTopicIds': <String>[],
+        'persons': <Object>[],
+        'personTopics': <Object>[],
+      };
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        LocalAppStorage.snapshotKey: jsonEncode(v5),
+      });
+      await expectLater(
+        LocalAppStorage().load(),
+        throwsA(isA<StorageFormatException>()),
+      );
+      final v4 = <String, Object>{
+        ...v5,
+        'schemaVersion': 4,
+        'customTopics': <Object>[
+          <String, Object?>{
+            'id': 'ai',
+            'title': 'AI',
+            'categoryId': 'work',
+            'description': '',
+            'source': 'aiGenerated',
+            'createdAt': null,
+          },
+        ],
+      };
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        LocalAppStorage.snapshotKey: jsonEncode(v4),
+      });
+      await expectLater(
+        LocalAppStorage().load(),
+        throwsA(isA<StorageFormatException>()),
+      );
+    });
+
+    testWidgets(
+      'private AI topic stays out of library and shows scope badges',
+      (tester) async {
+        final owner = Person(
+          id: 'owner',
+          displayName: 'Owner',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final private = Topic(
+          id: 'private-ai',
+          title: 'Private AI',
+          categoryId: 'work',
+          openingQuestion: 'Question',
+          source: TopicSource.aiGenerated,
+          scope: TopicScope.person,
+          ownerPersonId: owner.id,
+        );
+        final store = await ready(
+          storage: MemoryStorage(
+            appData(
+              customTopics: <Topic>[private],
+              persons: <Person>[owner],
+              personTopics: <PersonTopic>[
+                PersonTopic(
+                  personId: owner.id,
+                  topicId: private.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026),
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+        expect(find.text(private.title), findsNothing);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PersonDetailScreen(store: store, personId: owner.id),
+          ),
+        );
+        expect(find.text(private.title), findsOneWidget);
+        expect(find.text('この相手専用'), findsOneWidget);
+        expect(find.text('AI提案'), findsOneWidget);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicDetailScreen(store: store, topicId: private.id),
+          ),
+        );
+        expect(find.text('この相手専用'), findsOneWidget);
+        expect(find.text('AI提案'), findsOneWidget);
+        expect(find.byType(FilledButton), findsNothing);
+      },
+    );
+
+    testWidgets('private AI promotion confirmation fits 320px at 200% text', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final alice = Person(
+        id: 'alice-ui',
+        displayName: 'Alice',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final storage = MemoryStorage(appData(persons: <Person>[alice]));
+      final store = await ready(storage: storage);
+      final id =
+          (await store.addAiGeneratedTopicsToPerson(alice.id, <TopicDraft>[
+            TopicDraft(
+              title: 'Private AI',
+              categoryId: 'work',
+              openingQuestion: 'Long opening question for a narrow screen.',
+            ),
+          ]))!.single;
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: PersonTopicDetailScreen(
+            store: store,
+            personId: alice.id,
+            topicId: id,
+          ),
+        ),
+      );
+      expect(find.text('この相手専用'), findsOneWidget);
+      expect(find.text('AI提案'), findsOneWidget);
+      expect(find.text('話題の詳細を開く'), findsOneWidget);
+      await tester.drag(find.byType(ListView), const Offset(0, -500));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('共通の話題にする'));
+      await tester.pumpAndSettle();
+      expect(find.text('共通の話題にしますか？'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('キャンセル'));
+      await tester.pumpAndSettle();
+      expect(store.topicByIdIncludingArchived(id)!.scope, TopicScope.person);
     });
   });
 }
