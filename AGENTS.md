@@ -151,14 +151,13 @@ GitHub Issueに基づいて実装作業を行う場合は、以下のGitワー�
 * `main` ブランチへ直接実装・コミット・pushしてはいけません。
 * GitHub Issueごとに専用の作業ブランチを作成してください。
 * 実装、検証、修正、コミットはすべてその作業ブランチ上で行ってください。
-* 実装完了後は、`main` をbase branchとするPull Requestを作成してください。
+* 通常のIssueでは、実装完了後に `main` をbase branchとするPull Requestを作成してください。
 * 通常のタスクでは、エージェント自身がPull Requestをmergeしてはいけません。
 * Pull RequestがHuman Review可能な状態になった時点を、エージェントによる通常の実装作業の完了地点としてください。
 * GitHub側のBranch Rules / Rulesetを回避しようとしてはいけません。
+* 複数Issueを連続処理するEpic Modeでは、後述する専用ルールを通常ルールより優先してください。
 
 ### Issueの処理開始
-
-GitHub Issueを実装する場合は、コードを変更する前に以下を行ってください。
 
 GitHub Issueを実装する場合は、コードを変更する前に以下を行ってください。
 
@@ -167,7 +166,7 @@ GitHub Issueを実装する場合は、コードを変更する前に以下を�
 3. Issueの内容だけでは完了条件が十分に明確でない場合、Acceptance Criteriaを整理する
 4. 必要に応じて、整理したAcceptance CriteriaをGitHub Issueへ追記する
 5. Acceptance Criteriaに重大な仕様判断が含まれる場合は、実装前にユーザーへ確認する
-6. 最新の`main`を基点としてIssue専用ブランチを作成する
+6. 通常のIssueでは最新の`main`、Epic Modeの子Issueでは最新のintegration branchを基点としてIssue専用ブランチを作成する
 7. 作業ブランチへ移動してから実装を開始する
 
 ブランチ名は、Issueとの対応関係が分かる名前にしてください。
@@ -212,7 +211,7 @@ Commit messageは、変更内容が分かる簡潔なものにしてください
 Issueの実装および検証が完了したら、以下を行ってください。
 
 1. Issue用ブランチをGitHubへpushする
-2. `main` をbase branchとしてPull Requestを作成する
+2. 通常のIssueでは `main`、Epic Modeの子Issueでは指定されたintegration branchをbase branchとしてPull Requestを作成する
 3. Pull Request本文に変更内容をまとめる
 4. 実施した検証内容を記載する
 5. 対応するGitHub Issueをリンクする
@@ -234,7 +233,7 @@ Pull Requestを作成した後は、通常の実装タスクではそこで停�
 
 エージェントは以下を行ってはいけません。
 
-* 自分自身でPull Requestをmergeする
+* 通常のIssueで自分自身でPull Requestをmergeする
 * `main`へ直接pushする
 * Pull Requestを経由せず変更を反映する
 * Branch Rules / Rulesetを無効化または回避する
@@ -243,7 +242,7 @@ Pull Requestを作成した後は、通常の実装タスクではそこで停�
 
 ### GitHub IssueベースのDefinition of Done
 
-GitHub Issueに基づく実装タスクは、以下を満たした時点でHuman Review可能とみなします。
+GitHub Issueに基づく通常の実装タスクは、以下を満たした時点でHuman Review可能とみなします。
 
 * Issueの要件が実装されている
 * Acceptance Criteriaを満たしている
@@ -257,6 +256,80 @@ GitHub Issueに基づく実装タスクは、以下を満たした時点でHuman
 * Pull RequestがHuman Review可能な状態になっている
 
 通常のIssue処理では、`main`へのmergeはDefinition of Doneに含めません。
+
+### Epic Mode（複数Issueの半自動連続処理）
+
+複数の関連Issueを一つの大きな開発単位として連続処理する場合は、親IssueにEpic Modeであること、integration branch、子Issue、処理順を明記してください。
+
+Epic Modeの目的は、Issue単位の変更履歴と切り戻し単位を維持しながら、各子IssueのたびにHuman Reviewで停止する必要をなくし、最後の`integration -> main` Pull RequestだけをHuman Reviewの必須ポイントとすることです。
+
+#### Epic開始時
+
+1. `main`を基点として専用integration branchを作成する
+2. 親Issueにintegration branch名を記載する
+3. 親Issueに対象の子Issueと依存順をチェックリストとして記載する
+4. 子Issue間で同じモデルや密接に関連するファイルを触る場合は、原則として直列処理する
+5. 並列処理する場合は、編集領域が独立しており競合リスクが低いことを確認する
+
+integration branch名は目的が分かる名前にしてください。
+
+例:
+
+* `ai/wadee-ai-redesign`
+* `integration/topic-redesign`
+
+#### 子Issueの処理
+
+各子Issueについて、以下を順番に繰り返してください。
+
+1. 最新のintegration branchからIssue専用ブランチを作成する
+2. Issueの要件とAcceptance Criteriaに従って実装する
+3. format、`flutter analyze`、関連テスト、必要に応じて`flutter test`を実施する
+4. 意味のある変更についてReviewerにレビューさせる
+5. Reviewerの重要な指摘を同じIssueブランチで修正する
+6. 必要に応じてReviewerへ再確認させる
+7. integration branchをbaseとするPull Requestを作成する
+8. Pull Request本文に検証結果と対象Issueを記載する
+9. CI・テスト・Reviewer確認が成功しており、重大な未解決事項がない場合に限りintegration branchへmergeしてよい
+10. merge後のintegration branchを次のIssueの基点とする
+11. 親Issueの対応チェックを更新する
+
+Epic Modeでは、エージェントが子IssueのPull Requestをintegration branchへmergeすることを許可します。ただし、以下の場合はmergeせず停止またはHumanへエスカレーションしてください。
+
+* required checkが失敗している
+* Reviewerが重大な問題を未解決としている
+* IssueのAcceptance Criteriaを満たしていない
+* 重大な仕様判断が新たに必要になった
+* Migration、データ損失、セキュリティ、外部公開仕様など高リスクな判断が必要になった
+* Branch Rules / Ruleset上、許可された方法ではmergeできない
+
+Branch Rules / Rulesetを回避する操作は禁止します。
+
+#### Epic完了時
+
+すべての子Issueをintegration branchへ統合した後、以下を実施してください。
+
+1. integration branch全体で回帰確認を行う
+2. 可能な範囲で`flutter analyze`と`flutter test`を実行する
+3. Epic全体についてReviewerに最終レビューさせる
+4. integration branchから`main`へのPull Requestを1本作成する
+5. Pull Request本文にEpicの概要、含まれるIssue一覧、主な変更、Migration、検証結果、既知の懸念事項を記載する
+6. 親Issueをリンクする
+7. 最終Pull RequestがHuman Review可能な状態になった時点で停止する
+
+エージェントはEpicの最終`integration -> main` Pull Requestを自分でmergeしてはいけません。
+
+#### Epic ModeのDefinition of Done
+
+Epicは以下を満たした時点でエージェント作業完了とみなします。
+
+* すべての子Issueがintegration branchへ統合されている
+* 各子IssueにIssue専用ブランチとPull Requestの履歴が残っている
+* 子Issueごとの検証結果が記録されている
+* integration branch全体の回帰確認が完了している、または未実施理由が説明されている
+* integration branchから`main`への最終Pull Requestが作成されている
+* 親Issueと最終Pull Requestがリンクされている
+* 最終Pull RequestがHuman Review可能な状態になっている
 
 ---
 
