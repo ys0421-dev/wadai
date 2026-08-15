@@ -1,4 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +23,11 @@ import 'package:wadai/features/topics/topic_detail_screen.dart';
 import 'package:wadai/features/topics/topic_form_screen.dart';
 import 'package:wadai/features/topics/topic_tile.dart';
 import 'package:wadai/features/topics/category_icon.dart';
+import 'package:wadai/features/ai/local_ai_service.dart';
+import 'package:wadai/features/ai/local_model_manager.dart';
+import 'package:wadai/features/ai/ai_suggestion_screen.dart';
+import 'package:lib_llama_cpp/lib_llama_cpp.dart';
+import 'package:lib_llama_cpp_platform_interface/lib_llama_cpp_platform_interface.dart';
 import 'package:wadai/models/person.dart';
 import 'package:wadai/models/person_topic.dart';
 import 'package:wadai/models/topic.dart';
@@ -65,6 +74,62 @@ class MemoryStorage extends LocalAppStorage {
       personTopics: personTopics,
     );
   }
+}
+
+class _FakeLlamaEngine implements LlamaEngine {
+  _FakeLlamaEngine(this.responses);
+  final List<LlamaResponse> responses;
+  final commands = <LlamaCommand>[];
+
+  @override
+  Stream<LlamaResponse> transform(
+    Stream<LlamaCommand> commands, {
+    LlamaState initialState = const LlamaState.empty(),
+    LlamaCppLibraryRequest libraryRequest = const LlamaCppLibraryRequest(),
+  }) async* {
+    await for (final command in commands) {
+      this.commands.add(command);
+    }
+    yield* Stream<LlamaResponse>.fromIterable(responses);
+  }
+}
+
+class _FakeLocalAIService implements LocalAIService {
+  _FakeLocalAIService({this.result, this.error});
+
+  LocalAIResult? result;
+  Object? error;
+  int calls = 0;
+  LocalAIRequest? lastRequest;
+
+  @override
+  Future<LocalAIResult> suggest(
+    LocalAIRequest request, {
+    required void Function(LocalAIProgress progress) onProgress,
+  }) async {
+    calls++;
+    lastRequest = request;
+    onProgress(const LocalAIProgress(LocalAIStage.loadingModel));
+    if (error != null) throw error!;
+    onProgress(const LocalAIProgress(LocalAIStage.generating));
+    return result!;
+  }
+}
+
+class _ReadyModelManager extends LocalModelManager {
+  _ReadyModelManager();
+
+  @override
+  LocalModelStatus get status => const LocalModelStatus(LocalModelState.ready);
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<File> modelFile() async => File('fake.gguf');
+
+  @override
+  Future<bool> download() async => true;
 }
 
 class SaveFailStorage extends LocalAppStorage {
@@ -1102,6 +1167,7 @@ void main() {
         expect(store.customTopics.single.id, isNot('custom-1'));
       },
     );
+
   });
 
   group('additional persisted-state edge cases', () {
@@ -1207,7 +1273,12 @@ void main() {
           find.byType(TextFormField).at(1),
           'general note',
         );
-        await tester.tap(find.byType(FilledButton));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(PersonFormScreen),
+            matching: find.byType(FilledButton),
+          ),
+        );
         await tester.pumpAndSettle();
         final person = store.persons.single;
         expect(person.note, 'general note');
@@ -1463,7 +1534,12 @@ void main() {
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextFormField).at(0), 'after');
         await tester.enterText(find.byType(TextFormField).at(1), 'after note');
-        await tester.tap(find.byType(FilledButton));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(PersonFormScreen),
+            matching: find.byType(FilledButton),
+          ),
+        );
         await tester.pumpAndSettle();
         expect(store.personById('p')!.displayName, 'after');
         expect(store.personById('p')!.note, 'after note');
@@ -1479,7 +1555,12 @@ void main() {
         expect(store.personById('p'), isNotNull);
         await tester.tap(find.byIcon(Icons.delete_outline));
         await tester.pumpAndSettle();
-        await tester.tap(find.byType(FilledButton));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.byType(FilledButton),
+          ),
+        );
         await tester.pumpAndSettle();
         expect(store.personById('p'), isNull);
         expect(store.personTopics, isEmpty);
@@ -3193,7 +3274,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('話した話題はまだありません'), findsOneWidget);
       expect(find.text('話題のステータスを「話した」にすると、ここに表示されます。'), findsOneWidget);
-      expect(find.byType(FilledButton), findsNothing);
+      expect(find.widgetWithText(FilledButton, 'AIで話題を提案'), findsOneWidget);
     });
 
     testWidgets('person detail remains usable at 320px and 200% text scale', (
@@ -4356,5 +4437,889 @@ void main() {
         contains('builtin.hobby.recent_interest'),
       );
     });
+  });
+
+  group('local AI suggestions', () {
+    test(
+      'prompt includes structured profile, person history and cross-category seeds',
+      () {
+        final person = Person(
+          id: 'ai-person',
+          displayName: 'AI Person',
+          note: 'general note',
+          createdAt: DateTime.utc(2026),
+          profile: const PersonProfile(topicsToAvoid: 'avoid this'),
+        );
+        final topic = custom('ai-topic', title: 'Existing topic');
+        final prompt = const LocalAIPromptBuilder().build(
+          LocalAIRequest(
+            person: person,
+            topics: <Topic>[topic],
+            personTopics: <PersonTopic>[
+              PersonTopic(
+                personId: person.id,
+                topicId: topic.id,
+                note: 'person note',
+                createdAt: DateTime.utc(2026),
+              ),
+            ],
+          ),
+        );
+        expect(prompt, contains('avoid this'));
+        expect(prompt, contains('person note'));
+        expect(prompt, contains('Existing topic'));
+        expect(prompt, contains('hobby'));
+        expect(prompt, contains('beauty'));
+      },
+    );
+
+    test('strict parser accepts four drafts and rejects malformed output', () {
+      const parser = LocalAISuggestionParser();
+      final valid = jsonEncode(
+        List<Object?>.generate(
+          4,
+          (index) => <String, Object?>{
+            'title': 'Title $index',
+            'categoryId': 'hobby',
+            'openingQuestion': 'Question $index',
+            'talkingPoints': <String>['hint'],
+          },
+        ),
+      );
+      expect(parser.parse(valid), hasLength(4));
+      final base = (jsonDecode(valid) as List).cast<Map<String, dynamic>>();
+      final invalid = <String>[
+        '```json $valid ```',
+        '[]',
+        jsonEncode(base.take(3).toList()),
+        jsonEncode(<Object?>[...base, base.first]),
+        jsonEncode(
+          base
+              .map((item) => <String, dynamic>{...item, 'extra': true})
+              .toList(),
+        ),
+        jsonEncode(
+          base
+              .map(
+                (item) => <String, dynamic>{...item, 'categoryId': 'unknown'},
+              )
+              .toList(),
+        ),
+        jsonEncode(
+          base.map((item) => <String, dynamic>{...item, 'title': ' '}).toList(),
+        ),
+        jsonEncode(
+          base
+              .map((item) => <String, dynamic>{...item, 'openingQuestion': ''})
+              .toList(),
+        ),
+        jsonEncode(
+          base
+              .map(
+                (item) => <String, dynamic>{
+                  ...item,
+                  'talkingPoints': <String>[],
+                },
+              )
+              .toList(),
+        ),
+        jsonEncode(
+          base
+              .map(
+                (item) => <String, dynamic>{
+                  ...item,
+                  'talkingPoints': <Object?>[1],
+                },
+              )
+              .toList(),
+        ),
+        jsonEncode(
+          base.map((item) => <String, dynamic>{...item, 'note': 1}).toList(),
+        ),
+      ];
+      for (final raw in invalid) {
+        expect(() => parser.parse(raw), throwsFormatException);
+      }
+      expect(
+        () => parser.parse(
+          jsonEncode(
+            List<Object?>.filled(4, <String, Object?>{
+              'title': 'same',
+              'categoryId': 'hobby',
+              'openingQuestion': 'same',
+              'talkingPoints': <String>['hint'],
+            }),
+          ),
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test(
+      'service streams loading then generation and parses strict output',
+      () async {
+        final response = jsonEncode(
+          List<Object?>.generate(
+            4,
+            (index) => <String, Object?>{
+              'title': 'Service $index',
+              'categoryId': 'hobby',
+              'openingQuestion': 'Question $index',
+              'talkingPoints': <String>['hint'],
+            },
+          ),
+        );
+        final engine = _FakeLlamaEngine(<LlamaResponse>[
+          LlamaTokenResponse(text: response, index: 0),
+        ]);
+        final service = LlamaLocalAIService(
+          modelPath: 'fake.gguf',
+          engine: engine,
+        );
+        final stages = <LocalAIStage>[];
+        final person = Person(
+          id: 'service',
+          displayName: 'Service',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final result = await service.suggest(
+          LocalAIRequest(
+            person: person,
+            topics: const <Topic>[],
+            personTopics: const <PersonTopic>[],
+          ),
+          onProgress: (progress) => stages.add(progress.stage),
+        );
+        expect(stages, <LocalAIStage>[
+          LocalAIStage.loadingModel,
+          LocalAIStage.generating,
+        ]);
+        expect(result.drafts, hasLength(4));
+        expect(result.diagnostics.elapsed, isA<Duration>());
+        expect(engine.commands, hasLength(3));
+        expect(engine.commands[0], isA<LlamaLoadModelCommand>());
+        final generate = engine.commands[1] as LlamaGenerateMessagesCommand;
+        expect(generate.messages.map((message) => message.role), <String>[
+          'system',
+          'user',
+        ]);
+        expect(generate.maxTokens, 900);
+        expect(generate.temperature, 0.7);
+        expect(engine.commands[2], isA<LlamaDisposeCommand>());
+      },
+    );
+
+    test(
+      'service reports engine and invalid JSON failures while retaining diagnostics on success',
+      () async {
+        final person = Person(
+          id: 'service-failure',
+          displayName: 'Service',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final request = LocalAIRequest(
+          person: person,
+          topics: const <Topic>[],
+          personTopics: const <PersonTopic>[],
+        );
+        final failed = LlamaLocalAIService(
+          modelPath: 'fake.gguf',
+          engine: _FakeLlamaEngine(<LlamaResponse>[
+            const LlamaErrorResponse(message: 'engine failed'),
+          ]),
+        );
+        await expectLater(
+          failed.suggest(request, onProgress: (_) {}),
+          throwsA(isA<StateError>()),
+        );
+        final malformed = LlamaLocalAIService(
+          modelPath: 'fake.gguf',
+          engine: _FakeLlamaEngine(<LlamaResponse>[
+            const LlamaTokenResponse(text: 'not json', index: 0),
+          ]),
+        );
+        await expectLater(
+          malformed.suggest(request, onProgress: (_) {}),
+          throwsFormatException,
+        );
+      },
+    );
+
+    test(
+      'model manager initializes without downloading and validates final files',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-model-test',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        var requests = 0;
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        final bytes = <int>[1, 2, 3, 4];
+        server.listen((request) async {
+          requests++;
+          request.response.add(bytes);
+          await request.response.close();
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.unprepared);
+        expect(requests, 0);
+        expect(await manager.download(), isTrue);
+        expect(manager.status.state, LocalModelState.ready);
+        expect(requests, 1);
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.ready);
+        expect(requests, 1);
+      },
+    );
+
+    test(
+      'model download resumes a partial file only after a valid range',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp('wadai-range');
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        var range = '';
+        server.listen((request) async {
+          range = request.headers.value(HttpHeaders.rangeHeader) ?? '';
+          request.response.statusCode = HttpStatus.partialContent;
+          request.response.headers.set(
+            HttpHeaders.contentRangeHeader,
+            'bytes 2-3/${bytes.length}',
+          );
+          request.response.add(bytes.sublist(2));
+          await request.response.close();
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        await File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+        ).writeAsBytes(bytes.sublist(0, 2));
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        expect(await manager.download(), isTrue);
+        expect(range, 'bytes=2-');
+        expect(await (await manager.modelFile()).readAsBytes(), bytes);
+        expect(manager.status.state, LocalModelState.ready);
+      },
+    );
+
+    test(
+      'model download restarts after an ignored range and recovers after a bad full part',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-restart',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        final ranges = <String?>[];
+        var requestNumber = 0;
+        server.listen((request) async {
+          ranges.add(request.headers.value(HttpHeaders.rangeHeader));
+          requestNumber++;
+          if (requestNumber == 2) {
+            // A full sized but corrupted response must be deleted before retry.
+            request.response.add(<int>[9, 9, 9, 9]);
+          } else {
+            request.response.add(bytes);
+          }
+          await request.response.close();
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final partial = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+        );
+        await partial.writeAsBytes(bytes.sublist(0, 2));
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        // The first 200 response deliberately ignores bytes=2- and replaces it.
+        expect(await manager.download(), isTrue);
+        expect(ranges.single, 'bytes=2-');
+        await (await manager.modelFile()).delete();
+        await partial.writeAsBytes(<int>[9, 9, 9, 9]);
+        expect(await manager.download(), isFalse);
+        expect(partial.existsSync(), isFalse);
+        expect(await manager.download(), isTrue);
+        expect(ranges.last, isNull);
+      },
+    );
+
+    test(
+      'model download preserves incomplete part, rejects bad range, and coalesces callers',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp('wadai-retry');
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        var requests = 0;
+        server.listen((request) async {
+          requests++;
+          final range = request.headers.value(HttpHeaders.rangeHeader);
+          if (requests == 1) {
+            request.response.statusCode = HttpStatus.partialContent;
+            request.response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bytes 2-2/4',
+            );
+            request.response.add(<int>[3]);
+          } else if (requests == 2) {
+            request.response.statusCode = HttpStatus.partialContent;
+            request.response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bytes 3-3/4',
+            );
+            request.response.add(<int>[4]);
+          } else if (requests == 3) {
+            request.response.statusCode = HttpStatus.partialContent;
+            request.response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bad range',
+            );
+            request.response.add(<int>[4]);
+          } else {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            request.response.add(bytes);
+          }
+          await request.response.close();
+          if (requests <= 3) expect(range, isNotNull);
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final partial = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+        );
+        await partial.writeAsBytes(<int>[1, 2]);
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        expect(await manager.download(), isFalse);
+        expect(await partial.length(), 3);
+        expect(await manager.download(), isTrue);
+        await (await manager.modelFile()).delete();
+        await partial.writeAsBytes(<int>[1, 2]);
+        expect(await manager.download(), isFalse);
+        expect((await manager.modelFile()).existsSync(), isFalse);
+        final fresh = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await partial.delete();
+        final downloads = await Future.wait<bool>(<Future<bool>>[
+          fresh.download(),
+          fresh.download(),
+        ]);
+        expect(downloads, <bool>[true, true]);
+        expect(requests, 4);
+      },
+    );
+
+    test(
+      'model manager handles unsupported, invalid final files, and directory errors',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final unsupported = LocalModelManager(supported: () => false);
+        await unsupported.initialize();
+        expect(unsupported.status.state, LocalModelState.unsupported);
+        expect(await unsupported.download(), isFalse);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-invalid',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse('http://localhost/model'),
+          sizeBytes: 4,
+          sha256: sha256.convert(<int>[1, 2, 3, 4]).toString(),
+          license: 'test',
+        );
+        final invalid = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}',
+        );
+        await invalid.writeAsBytes(<int>[9]);
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.unprepared);
+        expect(invalid.existsSync(), isFalse);
+        final broken = LocalModelManager(
+          directoryProvider: () =>
+              Future<Directory>.error(StateError('directory')),
+          supported: () => true,
+        );
+        await broken.initialize();
+        expect(broken.status.state, LocalModelState.failed);
+        expect(await broken.download(), isFalse);
+        expect(broken.status.state, LocalModelState.failed);
+      },
+    );
+
+    testWidgets(
+      'AI screen exposes explicit download, unsupported state, retry, and profile guidance',
+      (tester) async {
+        final person = Person(
+          id: 'ai-empty',
+          displayName: 'Empty',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final store = await ready(
+          storage: MemoryStorage(appData(persons: <Person>[person])),
+        );
+        final unsupported = LocalModelManager(supported: () => false);
+        final failing = _FakeLocalAIService(
+          error: StateError('generation failed'),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AiSuggestionScreen(
+              store: store,
+              person: person,
+              modelManager: unsupported,
+              serviceFactory: (_) => failing,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(find.text('この端末ではローカルAIを利用できません。'), findsOneWidget);
+        expect(find.text('モデルをダウンロード'), findsNothing);
+        expect(find.text('プロフィールを追加'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'AI candidates start unselected, save once, and retain selections after a save failure',
+      (tester) async {
+        final manager = _ReadyModelManager();
+        final person = Person(
+          id: 'ui-person',
+          displayName: 'UI person',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final storage = MemoryStorage(
+          appData(persons: <Person>[person]),
+          failSaves: true,
+        );
+        final store = await ready(storage: storage);
+        final service = _FakeLocalAIService(
+          result: LocalAIResult(
+            drafts: List<TopicDraft>.generate(
+              4,
+              (index) => TopicDraft(
+                title: 'UI candidate $index',
+                categoryId: 'hobby',
+                openingQuestion: 'Opening $index',
+                talkingPoints: const <String>['hint'],
+                note: '',
+              ),
+            ),
+            diagnostics: const LocalAIDiagnostics(
+              elapsed: Duration.zero,
+              rssDeltaBytes: 0,
+            ),
+          ),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            initialRoute: '/ai',
+            routes: <String, WidgetBuilder>{
+              '/': (_) => const Scaffold(body: Text('returned')),
+              '/ai': (_) => AiSuggestionScreen(
+                store: store,
+                person: person,
+                modelManager: manager,
+                serviceFactory: (_) => service,
+              ),
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.text('4件の話題を生成'));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（0件）'), findsOneWidget);
+        await tester.tap(find.byType(CheckboxListTile).at(0));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（1件）'), findsOneWidget);
+        await tester.tap(find.byType(CheckboxListTile).at(1));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（2件）'), findsOneWidget);
+        final before = storage.saveCalls;
+        await tester.scrollUntilVisible(find.text('選択した話題を保存（2件）'), 300);
+        await tester.tap(find.text('選択した話題を保存（2件）'));
+        await tester.pump();
+        expect(storage.saveCalls - before, 1);
+        expect(find.text('保存する話題を選択（2件）'), findsOneWidget);
+        expect(find.textContaining('保存できませんでした'), findsOneWidget);
+        storage.failSaves = false;
+        await tester.scrollUntilVisible(find.text('選択した話題を保存（2件）'), 300);
+        await tester.tap(find.text('選択した話題を保存（2件）'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(store.personTopicsFor(person.id), hasLength(2));
+        expect(
+          store
+              .personTopicsFor(person.id)
+              .every((item) => item.status == PersonTopicStatus.planned),
+          isTrue,
+        );
+        expect(
+          store
+              .personTopicsFor(person.id)
+              .every(
+                (item) =>
+                    store.topicByIdIncludingArchived(item.topicId)!.scope ==
+                    TopicScope.person,
+              ),
+          isTrue,
+        );
+        expect(find.text('returned'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'AI generation error retries and its narrow layout stays usable',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(320, 2000));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final manager = _ReadyModelManager();
+        final person = Person(
+          id: 'retry',
+          displayName: 'Retry',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final store = await ready(
+          storage: MemoryStorage(appData(persons: <Person>[person])),
+        );
+        final service = _FakeLocalAIService(
+          error: StateError('generation failed'),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: AiSuggestionScreen(
+              store: store,
+              person: person,
+              modelManager: manager,
+              serviceFactory: (_) => service,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.text('4件の話題を生成'));
+        await tester.pump();
+        expect(find.text('生成をやり直す'), findsOneWidget);
+        service
+          ..error = null
+          ..result = LocalAIResult(
+            drafts: List<TopicDraft>.generate(
+              4,
+              (index) => TopicDraft(
+                title: 'Retry $index',
+                categoryId: 'hobby',
+                openingQuestion: 'Opening $index',
+                talkingPoints: const <String>['hint'],
+                note: '',
+              ),
+            ),
+            diagnostics: const LocalAIDiagnostics(
+              elapsed: Duration.zero,
+              rssDeltaBytes: 0,
+            ),
+          );
+        await tester.tap(find.text('生成をやり直す'));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（0件）'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'AI generation uses the latest profile and private topic history',
+      (tester) async {
+        final person = Person(
+          id: 'latest-ai',
+          displayName: 'Latest',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final store = await ready(
+          storage: MemoryStorage(appData(persons: <Person>[person])),
+        );
+        await store.updatePerson(
+          id: person.id,
+          displayName: person.displayName,
+          note: 'updated person note',
+          profile: const PersonProfile(interests: 'updated interest'),
+        );
+        await store.addAiGeneratedTopicsToPerson(person.id, <TopicDraft>[
+          TopicDraft(
+            title: 'Private history',
+            categoryId: 'hobby',
+            openingQuestion: 'How was it?',
+            talkingPoints: <String>['detail'],
+            note: 'topic note',
+          ),
+        ]);
+        final relation = store.personTopicsFor(person.id).single;
+        await store.updatePersonTopicStatus(
+          personId: person.id,
+          topicId: relation.topicId,
+          status: PersonTopicStatus.revisit,
+        );
+        await store.updatePersonTopicNote(
+          personId: person.id,
+          topicId: relation.topicId,
+          note: 'relation note',
+        );
+        final service = _FakeLocalAIService(
+          result: LocalAIResult(
+            drafts: List<TopicDraft>.generate(
+              4,
+              (index) => TopicDraft(
+                title: 'New $index',
+                categoryId: 'hobby',
+                openingQuestion: 'Question $index',
+                talkingPoints: const <String>['hint'],
+                note: '',
+              ),
+            ),
+            diagnostics: const LocalAIDiagnostics(
+              elapsed: Duration.zero,
+              rssDeltaBytes: 0,
+            ),
+          ),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AiSuggestionScreen(
+              store: store,
+              person: person,
+              modelManager: _ReadyModelManager(),
+              serviceFactory: (_) => service,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('プロフィールを追加'), findsNothing);
+        await tester.tap(find.text('4件の話題を生成'));
+        await tester.pump();
+        final request = service.lastRequest!;
+        expect(request.person.profile.interests, 'updated interest');
+        expect(request.person.note, 'updated person note');
+        expect(request.topics.single.title, 'Private history');
+        expect(request.personTopics.single.status, PersonTopicStatus.revisit);
+        expect(request.personTopics.single.note, 'relation note');
+      },
+    );
+
+    test('valid partial and final models promote without network', () async {
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = null);
+      final directory = await Directory.systemTemp.createTemp('wadai-promote');
+      addTearDown(() => directory.delete(recursive: true));
+      final bytes = <int>[1, 2, 3, 4];
+      final spec = ModelSpec(
+        name: 'test',
+        fileName: 'model.gguf',
+        url: Uri.parse('http://127.0.0.1:1/model'),
+        sizeBytes: bytes.length,
+        sha256: sha256.convert(bytes).toString(),
+        license: 'test',
+      );
+      final partial = File(
+        '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+      );
+      await partial.writeAsBytes(bytes);
+      final manager = LocalModelManager(
+        spec: spec,
+        directoryProvider: () async => directory,
+        supported: () => true,
+      );
+      expect(await manager.download(), isTrue);
+      expect(manager.status.state, LocalModelState.ready);
+      expect((await manager.modelFile()).existsSync(), isTrue);
+      final finalManager = LocalModelManager(
+        spec: spec,
+        directoryProvider: () async => directory,
+        supported: () => true,
+      );
+      expect(await finalManager.download(), isTrue);
+      expect(finalManager.status.state, LocalModelState.ready);
+    });
+
+    test(
+      'disposing during a slow model download closes the client safely',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-dispose',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        final requested = Completer<void>();
+        server.listen((request) async {
+          requested.complete();
+          await Future<void>.delayed(const Duration(seconds: 5));
+          await request.response.close();
+        });
+        final manager = LocalModelManager(
+          spec: ModelSpec(
+            name: 'test',
+            fileName: 'model.gguf',
+            url: Uri.parse(
+              'http://${server.address.address}:${server.port}/model',
+            ),
+            sizeBytes: 4,
+            sha256: sha256.convert(<int>[1, 2, 3, 4]).toString(),
+            license: 'test',
+          ),
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        var notifications = 0;
+        manager.addListener(() => notifications++);
+        final download = manager.download();
+        await requested.future;
+        manager.dispose();
+        final before = notifications;
+        await server.close(force: true);
+        expect(await download, isFalse);
+        expect(notifications, before);
+      },
+    );
+
+    test(
+      'initialize restores a valid previous model without network',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-previous',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse('http://127.0.0.1:1/model'),
+          sizeBytes: 4,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final previous = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.previous',
+        );
+        await previous.writeAsBytes(bytes);
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.ready);
+        expect((await manager.modelFile()).existsSync(), isTrue);
+        expect(previous.existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'disposing while directory lookup is pending does not start HTTP',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-late-dir',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final gate = Completer<Directory>();
+        var clients = 0;
+        final manager = LocalModelManager(
+          directoryProvider: () => gate.future,
+          clientFactory: () {
+            clients++;
+            return HttpClient();
+          },
+          supported: () => true,
+        );
+        final download = manager.download();
+        manager.dispose();
+        gate.complete(directory);
+        expect(await download, isFalse);
+        expect(clients, 0);
+      },
+    );
   });
 }
