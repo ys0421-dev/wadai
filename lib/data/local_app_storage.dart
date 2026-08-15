@@ -47,7 +47,7 @@ class LocalAppStorage {
   static const snapshotKey = 'wadee_app_data';
   static const customTopicsKey = 'custom_topics';
   static const favoriteIdsKey = 'favorite_topic_ids';
-  static const schemaVersion = 3;
+  static const schemaVersion = 4;
 
   Future<LocalAppData> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -123,7 +123,8 @@ class LocalAppStorage {
       if (version is! int) {
         throw const StorageFormatException('Invalid version');
       }
-      if (version == schemaVersion) return _parseV3(map);
+      if (version == schemaVersion) return _parseV4(map);
+      if (version == 3) return _parseV3(map);
       if (version == 2) return _parseV2(map);
       if (version == 1) return _parseV1(map);
       throw const StorageFormatException('Unsupported version');
@@ -134,7 +135,7 @@ class LocalAppStorage {
     }
   }
 
-  LocalAppData _parseV3(Map<String, dynamic> map) {
+  LocalAppData _parseV4(Map<String, dynamic> map) {
     final data = LocalAppData(
       customTopics: _parseCurrentTopics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
@@ -147,12 +148,26 @@ class LocalAppStorage {
     return data;
   }
 
+  /// v3 has the current topic relation status but people have no profile.
+  LocalAppData _parseV3(Map<String, dynamic> map) {
+    final data = LocalAppData(
+      customTopics: _parseCurrentTopics(map['customTopics']),
+      favoriteIds: _parseIds(map['favoriteTopicIds']),
+      archivedIds: _parseIds(map['archivedTopicIds']),
+      persons: _parseLegacyPersons(map['persons']),
+      personTopics: _parsePersonTopics(map['personTopics']),
+      needsMigration: true,
+    );
+    _validate(data);
+    return data;
+  }
+
   LocalAppData _parseV2(Map<String, dynamic> map) {
     final data = LocalAppData(
       customTopics: _parseCurrentTopics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
       archivedIds: _parseIds(map['archivedTopicIds']),
-      persons: _parsePersons(map['persons']),
+      persons: _parseLegacyPersons(map['persons']),
       personTopics: _parseV2PersonTopics(map['personTopics']),
       needsMigration: true,
     );
@@ -187,6 +202,9 @@ class LocalAppStorage {
 
   List<Person> _parsePersons(Object? value) =>
       _parseList<Person>(value, Person.fromJson, 'Invalid persons');
+
+  List<Person> _parseLegacyPersons(Object? value) =>
+      _parseList<Person>(value, Person.fromLegacyJson, 'Invalid persons');
 
   List<PersonTopic> _parsePersonTopics(Object? value) =>
       _parseList<PersonTopic>(
