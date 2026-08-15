@@ -7,6 +7,7 @@ import 'package:wadai/app/app_theme.dart';
 import 'package:wadai/app/app_shell.dart';
 import 'package:wadai/app/wadai_app.dart';
 import 'package:wadai/data/topic_catalog.dart';
+import 'package:wadai/data/topic_seed_catalog.dart';
 import 'package:wadai/data/local_app_storage.dart';
 import 'package:wadai/features/people/people_screen.dart';
 import 'package:wadai/features/people/person_detail_screen.dart';
@@ -21,6 +22,7 @@ import 'package:wadai/features/topics/category_icon.dart';
 import 'package:wadai/models/person.dart';
 import 'package:wadai/models/person_topic.dart';
 import 'package:wadai/models/topic.dart';
+import 'package:wadai/models/topic_seed.dart';
 import 'package:wadai/models/topic_draft.dart';
 import 'package:wadai/state/wadee_controller.dart';
 
@@ -3978,6 +3980,149 @@ void main() {
       await tester.tap(find.text('キャンセル'));
       await tester.pumpAndSettle();
       expect(store.topicByIdIncludingArchived(id)!.scope, TopicScope.person);
+    });
+  });
+
+  group('TopicSeed catalog', () {
+    test('has six stable, complete seeds for every category', () {
+      const categoryIds = <String>[
+        'hobby',
+        'travel',
+        'food',
+        'entertainment',
+        'work',
+        'daily',
+        'sports',
+        'learning',
+        'beauty',
+        'other',
+      ];
+      const expectedIds = <String>{
+        'seed.hobby.recent_hobby',
+        'seed.hobby.start_hobby',
+        'seed.hobby.tools',
+        'seed.hobby.continuation',
+        'seed.hobby.shared_experience',
+        'seed.hobby.improvement',
+        'seed.travel.recent_outing',
+        'seed.travel.wish_destination',
+        'seed.travel.local_food',
+        'seed.travel.accommodation',
+        'seed.travel.transport',
+        'seed.travel.memory_mishap',
+        'seed.food.favorite_food',
+        'seed.food.recent_tasty',
+        'seed.food.cooking',
+        'seed.food.restaurant_choice',
+        'seed.food.seasonal_food',
+        'seed.food.drinks',
+        'seed.entertainment.movies',
+        'seed.entertainment.dramas',
+        'seed.entertainment.music',
+        'seed.entertainment.books_comics',
+        'seed.entertainment.games',
+        'seed.entertainment.live_exhibitions',
+        'seed.work.role',
+        'seed.work.enjoyment',
+        'seed.work.recent_learning',
+        'seed.work.work_style',
+        'seed.work.team',
+        'seed.work.challenge',
+        'seed.daily.days_off',
+        'seed.daily.morning_night',
+        'seed.daily.recent_event',
+        'seed.daily.shopping',
+        'seed.daily.housework',
+        'seed.daily.refresh',
+        'seed.sports.watching',
+        'seed.sports.exercise',
+        'seed.sports.new_challenge',
+        'seed.sports.school_days',
+        'seed.sports.teams_players',
+        'seed.sports.health',
+        'seed.learning.current_study',
+        'seed.learning.want_to_learn',
+        'seed.learning.learning_style',
+        'seed.learning.school_subject',
+        'seed.learning.knowledge_use',
+        'seed.learning.curiosity',
+        'seed.beauty.skin_care',
+        'seed.beauty.hair',
+        'seed.beauty.fashion',
+        'seed.beauty.grooming',
+        'seed.beauty.relaxation',
+        'seed.beauty.new_items',
+        'seed.other.hometown',
+        'seed.other.childhood',
+        'seed.other.future',
+        'seed.other.seasonal_events',
+        'seed.other.what_if',
+        'seed.other.values',
+      };
+      expect(topicSeeds, hasLength(60));
+      expect(topicSeeds.map((seed) => seed.id).toSet(), expectedIds);
+      expect(topicSeeds.map((seed) => seed.theme).toSet(), hasLength(60));
+      for (final categoryId in categoryIds) {
+        final seeds = topicSeedsForCategory(categoryId);
+        expect(seeds, hasLength(6));
+        for (final seed in seeds) {
+          expect(seed.id, startsWith('seed.$categoryId.'));
+          expect(seed.categoryId, categoryId);
+          expect(seed.theme.trim(), isNotEmpty);
+          expect(seed.conversationPatterns, hasLength(greaterThanOrEqualTo(2)));
+          expect(seed.hintCandidates, hasLength(greaterThanOrEqualTo(2)));
+          expect(
+            seed.conversationPatterns.every((value) => value.trim().isNotEmpty),
+            isTrue,
+          );
+          expect(
+            seed.conversationPatterns.every(
+              (value) => !value.contains('{theme}'),
+            ),
+            isTrue,
+          );
+          expect(
+            seed.hintCandidates.every((value) => value.trim().isNotEmpty),
+            isTrue,
+          );
+        }
+      }
+      expect(
+        topicSeeds.map((seed) => seed.hintCandidates.first).toSet(),
+        hasLength(greaterThan(40)),
+      );
+      expect(topicSeedsForCategory('missing'), isEmpty);
+      expect(
+        jsonEncode(topicSeeds.map((seed) => seed.toJson()).toList()),
+        isNotEmpty,
+      );
+    });
+
+    test('is defensively copied and exposes unmodifiable entries', () {
+      final patterns = <String>['one', 'two'];
+      final hints = <String>['hint one', 'hint two'];
+      final seed = TopicSeed(
+        id: 'seed.hobby.copy',
+        categoryId: 'hobby',
+        theme: 'コピー確認',
+        conversationPatterns: patterns,
+        hintCandidates: hints,
+      );
+      patterns.add('changed');
+      hints.clear();
+      expect(seed.conversationPatterns, <String>['one', 'two']);
+      expect(seed.hintCandidates, <String>['hint one', 'hint two']);
+      expect(() => seed.conversationPatterns.add('no'), throwsUnsupportedError);
+      expect(() => seed.hintCandidates.clear(), throwsUnsupportedError);
+    });
+
+    test('does not change the built-in Topic catalog contract', () {
+      expect(createStaticTopics(), hasLength(36));
+      expect(legacyStaticTopicIdToBuiltinId, hasLength(36));
+      expect(
+        createStaticTopics().map((topic) => topic.id),
+        contains('builtin.hobby.recent_interest'),
+      );
     });
   });
 }
