@@ -7,6 +7,9 @@ import '../../models/topic.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/initial_avatar.dart';
 import '../../state/wadee_controller.dart';
+import '../ai/ai_suggestion_screen.dart';
+import '../ai/local_ai_service.dart';
+import '../ai/local_model_manager.dart';
 import '../topics/topic_actions.dart';
 import 'person_form_screen.dart';
 import 'person_topic_detail_screen.dart';
@@ -16,11 +19,15 @@ class PersonDetailScreen extends StatelessWidget {
   const PersonDetailScreen({
     required this.store,
     required this.personId,
+    this.modelManager,
+    this.aiServiceFactory,
     super.key,
   });
 
   final WadeeController store;
   final String personId;
+  final LocalModelManager? modelManager;
+  final LocalAIService Function(String modelPath)? aiServiceFactory;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -63,12 +70,14 @@ class PersonDetailScreen extends StatelessWidget {
                 store: store,
                 person: person,
                 onAddTopic: () => _pickTopic(context, person.id),
+                onSuggestTopics: () => _openAiSuggestions(context, person),
               )
             : _PersonTopicsBody(
                 store: store,
                 person: person,
                 assigned: assigned,
                 onAddTopic: () => _pickTopic(context, person.id),
+                onSuggestTopics: () => _openAiSuggestions(context, person),
               ),
       );
     },
@@ -87,6 +96,23 @@ class PersonDetailScreen extends StatelessWidget {
           builder: (_) => TopicPickerScreen(store: store, personId: id),
         ),
       );
+
+  Future<void> _openAiSuggestions(BuildContext context, Person person) {
+    final suppliedManager = modelManager;
+    return Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => AiSuggestionScreen(
+          store: store,
+          person: person,
+          modelManager: suppliedManager ?? LocalModelManager(),
+          disposeModelManager: suppliedManager == null,
+          serviceFactory:
+              aiServiceFactory ??
+              (modelPath) => LlamaLocalAIService(modelPath: modelPath),
+        ),
+      ),
+    );
+  }
 
   Future<void> _delete(BuildContext context, Person person) async {
     final confirmed = await showDialog<bool>(
@@ -122,17 +148,21 @@ class _EmptyPersonTopicsBody extends StatelessWidget {
     required this.store,
     required this.person,
     required this.onAddTopic,
+    required this.onSuggestTopics,
   });
 
   final WadeeController store;
   final Person person;
   final VoidCallback onAddTopic;
+  final VoidCallback onSuggestTopics;
 
   @override
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
     children: [
       _PersonProfileCard(store: store, person: person),
+      const SizedBox(height: 12),
+      _AiSuggestionButton(onPressed: onSuggestTopics),
       const SizedBox(height: 24),
       _TopicsHeading(count: 0),
       const SizedBox(height: 8),
@@ -165,12 +195,14 @@ class _PersonTopicsBody extends StatelessWidget {
     required this.person,
     required this.assigned,
     required this.onAddTopic,
+    required this.onSuggestTopics,
   });
 
   final WadeeController store;
   final Person person;
   final List<PersonTopic> assigned;
   final VoidCallback onAddTopic;
+  final VoidCallback onSuggestTopics;
 
   @override
   Widget build(BuildContext context) {
@@ -198,6 +230,10 @@ class _PersonTopicsBody extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                     child: _PersonProfileCard(store: store, person: person),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                    child: _AiSuggestionButton(onPressed: onSuggestTopics),
                   ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
@@ -324,6 +360,21 @@ class _ProfileEntry extends StatelessWidget {
       const SizedBox(height: 2),
       Text(value, style: Theme.of(context).textTheme.bodyMedium),
     ],
+  );
+}
+
+class _AiSuggestionButton extends StatelessWidget {
+  const _AiSuggestionButton({required this.onPressed});
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: double.infinity,
+    child: FilledButton.icon(
+      onPressed: onPressed,
+      icon: const Icon(Icons.auto_awesome),
+      label: const Text('AIで話題を提案'),
+    ),
   );
 }
 
