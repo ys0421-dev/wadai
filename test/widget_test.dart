@@ -132,19 +132,17 @@ Future<void> applyTopicFilters(
   String? category,
   String? sort,
 }) async {
+  if (category != null) {
+    final categoryChip = find.widgetWithText(ChoiceChip, category);
+    await tester.ensureVisible(categoryChip);
+    await tester.tap(categoryChip);
+    await tester.pumpAndSettle();
+  }
+  if (display == null && sort == null) return;
   await tester.tap(find.byTooltip('絞り込みと並び替え'));
   await tester.pumpAndSettle();
   if (display != null) {
     await tester.tap(find.text(display).last);
-    await tester.pump();
-  }
-  if (category != null) {
-    await tester.drag(
-      find.byKey(const Key('topic-filter-sheet-list')),
-      const Offset(0, -360),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text(category).last);
     await tester.pump();
   }
   if (sort != null) {
@@ -1756,6 +1754,245 @@ void main() {
     );
   });
 
+  group('Topic category navigation', () {
+    testWidgets(
+      'shows all category chips and intersects the selected category',
+      (tester) async {
+        final work = custom(
+          'category-work',
+          title: 'Work only',
+        ).copyWith(categoryId: 'work');
+        final beauty = custom(
+          'category-beauty',
+          title: 'Beauty only',
+        ).copyWith(categoryId: 'beauty');
+        final store = await ready(
+          storage: MemoryStorage(appData(customTopics: <Topic>[work, beauty])),
+        );
+        expect(store.topics.map((topic) => topic.title), contains('Work only'));
+        expect(
+          store.topics
+              .firstWhere((topic) => topic.title == 'Work only')
+              .categoryId,
+          'work',
+        );
+        await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+
+        expect(
+          find.byKey(const Key('topic-category-chip-all')),
+          findsOneWidget,
+        );
+        for (final category in categories) {
+          final chip = find.byKey(Key('topic-category-chip-${category.id}'));
+          await tester.ensureVisible(chip);
+          expect(chip, findsOneWidget);
+        }
+        await applyTopicFilters(tester, display: '自作');
+        final workChip = find.byKey(const Key('topic-category-chip-work'));
+        await tester.ensureVisible(workChip);
+        await tester.tap(workChip);
+        await tester.pumpAndSettle();
+        expect(tester.widget<ChoiceChip>(workChip).selected, isTrue);
+        final semanticsHandle = tester.ensureSemantics();
+        expect(
+          tester.getSemantics(workChip),
+          matchesSemantics(
+            label: '仕事',
+            hasSelectedState: true,
+            isSelected: true,
+            isButton: true,
+            hasEnabledState: true,
+            isEnabled: true,
+            isFocusable: true,
+            hasTapAction: true,
+            hasFocusAction: true,
+          ),
+        );
+        semanticsHandle.dispose();
+        expect(find.text('Work only'), findsOneWidget);
+        expect(find.text('Beauty only'), findsNothing);
+        expect(
+          tester
+              .widget<ChoiceChip>(
+                find.byKey(const Key('topic-category-chip-all')),
+              )
+              .selected,
+          isFalse,
+        );
+      },
+    );
+
+    testWidgets(
+      'uses catalog sections for standard order and flat lists otherwise',
+      (tester) async {
+        final work = custom(
+          'section-work',
+          title: 'Zebra work',
+        ).copyWith(categoryId: 'work');
+        final beauty = custom(
+          'section-beauty',
+          title: 'Alpha beauty',
+        ).copyWith(categoryId: 'beauty');
+        final store = await ready(
+          storage: MemoryStorage(appData(customTopics: <Topic>[work, beauty])),
+        );
+        await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+        await applyTopicFilters(tester, display: '自作');
+
+        expect(
+          find.byKey(const Key('topic-category-header-work')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('topic-category-header-beauty')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('topic-category-header-hobby')),
+          findsNothing,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('topic-category-header-work')),
+            matching: find.text('1件'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .getTopLeft(find.byKey(const Key('topic-category-header-work')))
+              .dy,
+          lessThan(
+            tester
+                .getTopLeft(
+                  find.byKey(const Key('topic-category-header-beauty')),
+                )
+                .dy,
+          ),
+        );
+
+        await applyTopicFilters(tester, sort: '名前順');
+        expect(
+          find.byKey(const Key('topic-category-header-work')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('topic-category-header-beauty')),
+          findsNothing,
+        );
+        expect(
+          tester.getTopLeft(find.text('Alpha beauty')).dy,
+          lessThan(tester.getTopLeft(find.text('Zebra work')).dy),
+        );
+
+        final workChip = find.byKey(const Key('topic-category-chip-work'));
+        await tester.ensureVisible(workChip);
+        await tester.tap(workChip);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('topic-category-header-work')),
+          findsOneWidget,
+        );
+        expect(find.text('Zebra work'), findsOneWidget);
+        expect(find.text('Alpha beauty'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'filter sheet has no category controls and category chips stay usable at 320px',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(320, 700));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final store = await ready(storage: MemoryStorage(appData()));
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: TopicsScreen(store: store),
+          ),
+        );
+        final beautyChip = find.byKey(const Key('topic-category-chip-beauty'));
+        await tester.ensureVisible(beautyChip);
+        await tester.tap(beautyChip);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        await tester.tap(find.byTooltip('絞り込みと並び替え'));
+        await tester.pumpAndSettle();
+        expect(find.byType(RadioListTile<String?>), findsNothing);
+        expect(find.text('カテゴリー'), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+    testWidgets('empty state clears only the condition that caused it', (
+      tester,
+    ) async {
+      final work = custom(
+        'empty-work',
+        title: 'Work topic',
+      ).copyWith(categoryId: 'work');
+      final store = await ready(
+        storage: MemoryStorage(appData(customTopics: <Topic>[work])),
+      );
+      await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+      await applyTopicFilters(tester, display: '自作', category: '美容');
+
+      expect(find.text('美容の話題がありません'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'すべて'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, 'すべて'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChoiceChip>(
+              find.byKey(const Key('topic-category-chip-beauty')),
+            )
+            .selected,
+        isFalse,
+      );
+      expect(find.text('Work topic'), findsOneWidget);
+
+      final workChip = find.byKey(const Key('topic-category-chip-work'));
+      await tester.ensureVisible(workChip);
+      await tester.tap(workChip);
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'no such category topic');
+      await tester.pumpAndSettle();
+      expect(find.text('条件に一致する話題がありません'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, '検索をクリア'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, '検索をクリア'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChoiceChip>(
+              find.byKey(const Key('topic-category-chip-beauty')),
+            )
+            .selected,
+        isFalse,
+      );
+      expect(tester.widget<ChoiceChip>(workChip).selected, isTrue);
+      expect(find.text('Work topic'), findsOneWidget);
+    });
+
+    testWidgets('sort alone is not treated as an empty display filter', (
+      tester,
+    ) async {
+      final store = await ready(storage: MemoryStorage(appData()));
+      for (final topic in List<Topic>.from(store.topics)) {
+        await store.archiveTopic(topic.id);
+      }
+      await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+      await applyTopicFilters(tester, sort: '名前順');
+
+      expect(find.text('話題がありません'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'フィルターをクリア'), findsNothing);
+    });
+  });
+
   group('Phase 6 UX', () {
     testWidgets(
       'People searches display names and notes, shows no result, clears, and sorts by name',
@@ -1873,6 +2110,12 @@ void main() {
         expect(find.text('Zebra unique'), findsNothing);
 
         await applyTopicFilters(tester, display: 'すべて');
+        final allCategoryChip = find.byKey(
+          const Key('topic-category-chip-all'),
+        );
+        await tester.ensureVisible(allCategoryChip);
+        await tester.tap(allCategoryChip);
+        await tester.pumpAndSettle();
         await tester.enterText(search, 'unique');
         await tester.pump();
         expect(find.text('Alpha unique'), findsOneWidget);
@@ -1880,14 +2123,9 @@ void main() {
         await tester.enterText(search, 'no matching topic');
         await tester.pump();
         expect(find.text('条件に一致する話題がありません'), findsOneWidget);
-        await tester.tap(find.text('フィルターをクリア'));
+        await tester.tap(find.text('検索をクリア'));
         await tester.pumpAndSettle();
-        expect(
-          tester.widget<TextField>(search).controller!.text,
-          'no matching topic',
-        );
-        await tester.tap(find.byTooltip('検索をクリア'));
-        await tester.pumpAndSettle();
+        expect(tester.widget<TextField>(search).controller!.text, isEmpty);
 
         await applyTopicFilters(tester, display: 'アーカイブ');
         expect(find.text('アーカイブした話題がありません'), findsOneWidget);
@@ -3063,22 +3301,27 @@ void main() {
         await tester.enterText(find.byType(TextField), 'Alpha');
         await applyTopicFilters(tester, display: 'お気に入り', category: '仕事');
         expect(find.byType(Badge), findsOneWidget);
-        expect(find.byType(InputChip), findsNWidgets(2));
+        expect(find.byType(InputChip), findsOneWidget);
         expect(find.text('お気に入り'), findsOneWidget);
-        expect(find.widgetWithText(InputChip, '仕事'), findsOneWidget);
-        expect(find.text('すべて解除'), findsOneWidget);
+        expect(
+          tester
+              .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, '仕事'))
+              .selected,
+          isTrue,
+        );
 
-        final categoryChip = find.widgetWithText(InputChip, '仕事');
-        final chipRect = tester.getRect(categoryChip);
-        await tester.tapAt(Offset(chipRect.right - 12, chipRect.center.dy));
+        final allCategoryChip = find.byKey(
+          const Key('topic-category-chip-all'),
+        );
+        await tester.ensureVisible(allCategoryChip);
+        await tester.tap(allCategoryChip);
         await tester.pump();
-        expect(categoryChip, findsNothing);
         expect(
           tester.widget<TextField>(find.byType(TextField)).controller!.text,
           'Alpha',
         );
         await applyTopicFilters(tester, category: '仕事');
-        await tester.tap(find.text('すべて解除'));
+        await applyTopicFilters(tester, display: 'すべて');
         await tester.pump();
         expect(find.byType(InputChip), findsNothing);
         expect(
@@ -3164,7 +3407,7 @@ void main() {
       expect(reloaded.customTopics.single.categoryId, 'beauty');
     });
 
-    testWidgets('話題検索と検索条件シートで美容カテゴリーに絞り込める', (tester) async {
+    testWidgets('話題検索とカテゴリーチップで美容カテゴリーに絞り込める', (tester) async {
       final beauty = Topic(
         id: 'beauty-topic',
         title: '美容の話題',
@@ -3194,20 +3437,9 @@ void main() {
       await tester.tap(find.byTooltip('検索をクリア'));
       await tester.pump();
 
-      await tester.tap(find.byTooltip('絞り込みと並び替え'));
-      await tester.pumpAndSettle();
-      final beautyOption = find.widgetWithText(RadioListTile<String?>, '美容');
-      await tester.ensureVisible(beautyOption);
-      await tester.pumpAndSettle();
-      expect(beautyOption, findsOneWidget);
-      await tester.tap(beautyOption);
-      await tester.pump();
-      await tester.tap(
-        find.descendant(
-          of: find.byType(FilledButton),
-          matching: find.textContaining('件を表示'),
-        ),
-      );
+      final beautyChip = find.widgetWithText(ChoiceChip, '美容');
+      await tester.ensureVisible(beautyChip);
+      await tester.tap(beautyChip);
       await tester.pumpAndSettle();
 
       expect(find.text(beauty.title), findsOneWidget);
