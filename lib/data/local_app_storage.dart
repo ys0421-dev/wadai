@@ -47,7 +47,7 @@ class LocalAppStorage {
   static const snapshotKey = 'wadee_app_data';
   static const customTopicsKey = 'custom_topics';
   static const favoriteIdsKey = 'favorite_topic_ids';
-  static const schemaVersion = 4;
+  static const schemaVersion = 5;
 
   Future<LocalAppData> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -123,7 +123,8 @@ class LocalAppStorage {
       if (version is! int) {
         throw const StorageFormatException('Invalid version');
       }
-      if (version == schemaVersion) return _parseV4(map);
+      if (version == schemaVersion) return _parseV5(map);
+      if (version == 4) return _parseV4(map);
       if (version == 3) return _parseV3(map);
       if (version == 2) return _parseV2(map);
       if (version == 1) return _parseV1(map);
@@ -135,7 +136,7 @@ class LocalAppStorage {
     }
   }
 
-  LocalAppData _parseV4(Map<String, dynamic> map) {
+  LocalAppData _parseV5(Map<String, dynamic> map) {
     final data = LocalAppData(
       customTopics: _parseCurrentTopics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
@@ -148,10 +149,25 @@ class LocalAppStorage {
     return data;
   }
 
+  /// v4 already has PersonProfile, but its topics use description instead of
+  /// an opening question, talking points and note.
+  LocalAppData _parseV4(Map<String, dynamic> map) {
+    final data = LocalAppData(
+      customTopics: _parseV4Topics(map['customTopics']),
+      favoriteIds: _parseIds(map['favoriteTopicIds']),
+      archivedIds: _parseIds(map['archivedTopicIds']),
+      persons: _parsePersons(map['persons']),
+      personTopics: _parsePersonTopics(map['personTopics']),
+      needsMigration: true,
+    );
+    _validate(data);
+    return data;
+  }
+
   /// v3 has the current topic relation status but people have no profile.
   LocalAppData _parseV3(Map<String, dynamic> map) {
     final data = LocalAppData(
-      customTopics: _parseCurrentTopics(map['customTopics']),
+      customTopics: _parseV4Topics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
       archivedIds: _parseIds(map['archivedTopicIds']),
       persons: _parseLegacyPersons(map['persons']),
@@ -164,7 +180,7 @@ class LocalAppStorage {
 
   LocalAppData _parseV2(Map<String, dynamic> map) {
     final data = LocalAppData(
-      customTopics: _parseCurrentTopics(map['customTopics']),
+      customTopics: _parseV4Topics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
       archivedIds: _parseIds(map['archivedTopicIds']),
       persons: _parseLegacyPersons(map['persons']),
@@ -193,6 +209,9 @@ class LocalAppStorage {
     (item) => Topic.fromJson(item),
     'Invalid custom topics',
   );
+
+  List<Topic> _parseV4Topics(Object? value) =>
+      _parseList<Topic>(value, Topic.fromV4Json, 'Invalid custom topics');
 
   List<Topic> _parseLegacyTopics(Object? value) => _parseList<Topic>(
     value,
@@ -271,6 +290,8 @@ class LocalAppStorage {
     for (final topic in data.customTopics) {
       if (topic.source != TopicSource.userCreated ||
           topic.id.isEmpty ||
+          topic.title.trim().isEmpty ||
+          topic.openingQuestion.trim().isEmpty ||
           !customIds.add(topic.id) ||
           builtinIds.contains(topic.id)) {
         throw const StorageFormatException('Invalid custom topics');
