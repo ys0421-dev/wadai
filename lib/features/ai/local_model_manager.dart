@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -52,6 +53,8 @@ class LocalModelStatus {
 
 typedef ModelDirectoryProvider = Future<Directory> Function();
 typedef ModelHttpClientFactory = HttpClient Function();
+
+bool supportsLocalAIAbi(ffi.Abi abi) => abi == ffi.Abi.androidArm64;
 
 class LocalModelManager extends ChangeNotifier {
   LocalModelManager({
@@ -280,5 +283,5 @@ class LocalModelManager extends ChangeNotifier {
   }
 
   static bool _defaultSupported() =>
-      !kIsWeb && Platform.isAndroid && Platform.version.isNotEmpty;
+      !kIsWeb && Platform.isAndroid && supportsLocalAIAbi(ffi.Abi.current());
 }
