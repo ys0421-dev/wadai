@@ -15,6 +15,7 @@ import 'package:wadai/features/people/person_topic_detail_screen.dart';
 import 'package:wadai/features/people/topic_picker_screen.dart';
 import 'package:wadai/features/topics/topics_screen.dart';
 import 'package:wadai/features/topics/topic_detail_screen.dart';
+import 'package:wadai/features/topics/topic_form_screen.dart';
 import 'package:wadai/features/topics/topic_tile.dart';
 import 'package:wadai/features/topics/category_icon.dart';
 import 'package:wadai/models/person.dart';
@@ -63,6 +64,17 @@ class MemoryStorage extends LocalAppStorage {
   }
 }
 
+class SaveFailStorage extends LocalAppStorage {
+  @override
+  Future<void> saveSnapshot({
+    required List<Topic> customTopics,
+    required Iterable<String> favoriteIds,
+    required Iterable<String> archivedIds,
+    required List<Person> persons,
+    required List<PersonTopic> personTopics,
+  }) => Future<void>.error(StateError('save failure'));
+}
+
 LocalAppData appData({
   List<Topic> customTopics = const <Topic>[],
   Set<String> favoriteIds = const <String>{},
@@ -79,15 +91,31 @@ LocalAppData appData({
   needsMigration: needsMigration,
 );
 
-Topic custom(String id, {String title = 'custom', String description = ''}) =>
-    Topic(
-      id: id,
-      title: title,
-      categoryId: 'other',
-      description: description,
-      source: TopicSource.userCreated,
-      createdAt: DateTime.utc(2026),
-    );
+Topic custom(
+  String id, {
+  String title = 'custom',
+  String openingQuestion = '',
+  List<String> talkingPoints = const <String>[],
+  String note = '',
+}) => Topic(
+  id: id,
+  title: title,
+  categoryId: 'other',
+  openingQuestion: openingQuestion,
+  talkingPoints: talkingPoints,
+  note: note,
+  source: TopicSource.userCreated,
+  createdAt: DateTime.utc(2026),
+);
+
+Map<String, Object?> v4TopicJson(Topic topic) => <String, Object?>{
+  'id': topic.id,
+  'title': topic.title,
+  'categoryId': topic.categoryId,
+  'description': topic.note,
+  'source': topic.source.name,
+  'createdAt': topic.createdAt?.toIso8601String(),
+};
 
 Future<WadeeController> ready({LocalAppStorage? storage}) async {
   final store = WadeeController(storage: storage);
@@ -215,7 +243,7 @@ void main() {
         final snapshot =
             jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
                 as Map<String, dynamic>;
-        expect(snapshot['schemaVersion'], 4);
+        expect(snapshot['schemaVersion'], 5);
         expect(store.personById('legacy-person')!.profile.isEmpty, isTrue);
         expect(
           store.personTopic('legacy-person', topic.id)!.status,
@@ -225,7 +253,7 @@ void main() {
       },
     );
 
-    test('v4 snapshot reload preserves every profile field', () async {
+    test('v5 snapshot roundtrip preserves every profile field', () async {
       const profile = PersonProfile(
         relationship: PersonRelationship.supervisor,
         closeness: PersonCloseness.close,
@@ -400,7 +428,7 @@ void main() {
         jsonDecode(
           prefs.getString(LocalAppStorage.snapshotKey)!,
         )['schemaVersion'],
-        4,
+        5,
       );
       expect(store.isFavorite('old'), isTrue);
       expect(store.isFavorite(builtin.id), isTrue);
@@ -504,7 +532,7 @@ void main() {
         final snapshot =
             jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
                 as Map<String, dynamic>;
-        expect(snapshot['schemaVersion'], 4);
+        expect(snapshot['schemaVersion'], 5);
         expect(
           (snapshot['personTopics'] as List<dynamic>).single['status'],
           'planned',
@@ -567,8 +595,8 @@ void main() {
         jsonEncode(<String, Object>{
           'schemaVersion': 2,
           'customTopics': <Object>[
-            custom('dup').toJson(),
-            custom('dup').toJson(),
+            v4TopicJson(custom('dup')),
+            v4TopicJson(custom('dup')),
           ],
           'favoriteTopicIds': <String>[],
           'archivedTopicIds': <String>[],
@@ -628,8 +656,8 @@ void main() {
         );
         final store = await ready(storage: storage);
         await Future.wait(<Future<bool>>[
-          store.addTopic(title: 'one', categoryId: 'other', description: ''),
-          store.addTopic(title: 'two', categoryId: 'other', description: ''),
+          store.addTopic(title: 'one', categoryId: 'other'),
+          store.addTopic(title: 'two', categoryId: 'other'),
         ]);
         final builtin = store.topics.first;
         await store.toggleFavorite(builtin.id);
@@ -737,11 +765,220 @@ void main() {
     );
 
     test('Topic JSON is immutable and excludes favorite state', () {
-      final topic = custom('json', description: 'd');
+      final topic = custom('json', note: 'd');
       final restored = Topic.fromJson(topic.toJson());
       expect(restored.source, TopicSource.userCreated);
-      expect(restored.description, 'd');
+      expect(restored.note, 'd');
       expect(topic.toJson().containsKey('isFavorite'), isFalse);
+    });
+
+    test(
+      'v5 topic preserves conversation fields and defensive talking points',
+      () {
+        final sourcePoints = <String>['  きっかけ  ', '次に聞くこと'];
+        final topic = Topic(
+          id: 'conversation',
+          title: '会話',
+          categoryId: 'other',
+          openingQuestion: '最近どうですか？',
+          talkingPoints: sourcePoints,
+          note: 'メモ',
+          source: TopicSource.userCreated,
+        );
+        sourcePoints.add('外部からの変更');
+
+        expect(topic.talkingPoints, <String>['  きっかけ  ', '次に聞くこと']);
+        expect(() => topic.talkingPoints.add('変更'), throwsUnsupportedError);
+        final restored = Topic.fromJson(topic.toJson());
+        expect(restored.openingQuestion, '最近どうですか？');
+        expect(restored.talkingPoints, topic.talkingPoints);
+        expect(restored.note, 'メモ');
+        expect(restored.toJson().containsKey('description'), isFalse);
+      },
+    );
+
+    test(
+      'v4 snapshot migrates all topic, person and relation state to v5',
+      () async {
+        const profile = PersonProfile(
+          relationship: PersonRelationship.family,
+          closeness: PersonCloseness.close,
+          ageGroup: PersonAgeGroup.forties,
+          interests: '読書',
+          workOrSchool: '教育',
+          recentEvents: '引っ越し',
+          likelyInterests: '建築',
+          commonTopics: '散歩',
+          topicsToAvoid: '体調',
+          nextQuestions: '次の休み',
+        );
+        final person = Person(
+          id: 'v4-person',
+          displayName: 'V4 person',
+          note: 'person memo',
+          createdAt: DateTime.utc(2026),
+          profile: profile,
+        );
+        final relation = PersonTopic(
+          personId: person.id,
+          topicId: 'v4-topic',
+          note: 'relation memo',
+          createdAt: DateTime.utc(2026),
+          status: PersonTopicStatus.revisit,
+        );
+        final raw = jsonEncode(<String, Object>{
+          'schemaVersion': 4,
+          'customTopics': <Object>[
+            <String, Object?>{
+              'id': 'v4-topic',
+              'title': '前の話題',
+              'categoryId': 'other',
+              'description': '以前の説明',
+              'source': 'userCreated',
+              'createdAt': DateTime.utc(2026).toIso8601String(),
+            },
+          ],
+          'favoriteTopicIds': <String>['v4-topic'],
+          'archivedTopicIds': <String>['v4-topic'],
+          'persons': <Object>[person.toJson()],
+          'personTopics': <Object>[relation.toJson()],
+        });
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          LocalAppStorage.snapshotKey: raw,
+        });
+
+        final store = await ready();
+        final topic = store.topicByIdIncludingArchived('v4-topic')!;
+        expect(topic.note, '以前の説明');
+        expect(topic.openingQuestion, '「前の話題」について、どう思いますか？');
+        expect(topic.talkingPoints, isEmpty);
+        expect(store.isFavorite(topic.id), isTrue);
+        expect(store.isArchived(topic.id), isTrue);
+        expect(store.personById(person.id)!.profile.toJson(), profile.toJson());
+        expect(store.personById(person.id)!.note, 'person memo');
+        expect(
+          store.personTopic(person.id, topic.id)!.status,
+          PersonTopicStatus.revisit,
+        );
+        expect(store.personTopic(person.id, topic.id)!.note, 'relation memo');
+        final prefs = await SharedPreferences.getInstance();
+        final saved =
+            jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
+                as Map<String, dynamic>;
+        expect(saved['schemaVersion'], 5);
+        final savedTopic = (saved['customTopics'] as List).single as Map;
+        expect(savedTopic['note'], '以前の説明');
+        expect(savedTopic['openingQuestion'], '「前の話題」について、どう思いますか？');
+        expect(savedTopic['talkingPoints'], isEmpty);
+      },
+    );
+
+    test('failed v4 migration save keeps the raw snapshot', () async {
+      final raw = jsonEncode(<String, Object>{
+        'schemaVersion': 4,
+        'customTopics': <Object>[
+          <String, Object?>{
+            'id': 'failed-v4-topic',
+            'title': '失敗する移行',
+            'categoryId': 'other',
+            'description': '残す説明',
+            'source': 'userCreated',
+            'createdAt': DateTime.utc(2026).toIso8601String(),
+          },
+        ],
+        'favoriteTopicIds': <String>[],
+        'archivedTopicIds': <String>[],
+        'persons': <Object>[],
+        'personTopics': <Object>[],
+      });
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        LocalAppStorage.snapshotKey: raw,
+      });
+
+      final store = WadeeController(storage: SaveFailStorage());
+      await store.load();
+      final prefs = await SharedPreferences.getInstance();
+      expect(store.loadState, AppLoadState.error);
+      expect(prefs.getString(LocalAppStorage.snapshotKey), raw);
+    });
+
+    testWidgets(
+      'conversation topic tile is usable at 320px and 200% text scale',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(320, 700));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final topic = Topic(
+          id: 'narrow-conversation',
+          title: '折り返して表示される長めの会話タイトル',
+          categoryId: 'other',
+          openingQuestion: '最近、心に残った出来事について聞かせてもらえますか？',
+          talkingPoints: const <String>['始まったきっかけ', '次にしてみたいこと', '思い出に残った場面'],
+          note: 'メモ',
+          source: TopicSource.userCreated,
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: ListView(
+                children: [
+                  TopicTile(
+                    topic: topic,
+                    categoryName: 'その他',
+                    isFavorite: false,
+                    onTap: () {},
+                    onToggleFavorite: () {},
+                    onEdit: () {},
+                    onArchive: () {},
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        expect(find.text('最初のひとこと'), findsOneWidget);
+        expect(find.text('・始まったきっかけ'), findsOneWidget);
+        expect(find.text('ほか 1件'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    test(
+      'controller trims conversation fields and removes empty talking points',
+      () async {
+        final store = await ready(storage: MemoryStorage(appData()));
+        expect(
+          await store.addTopic(
+            title: '  新しい話題  ',
+            categoryId: ' other ',
+            openingQuestion: '  最初の質問  ',
+            talkingPoints: <String>['  ヒント ', ' ', '\n次のヒント\n'],
+            note: '  メモ  ',
+          ),
+          isTrue,
+        );
+        final topic = store.customTopics.single;
+        expect(topic.title, '新しい話題');
+        expect(topic.categoryId, 'other');
+        expect(topic.openingQuestion, '最初の質問');
+        expect(topic.talkingPoints, <String>['ヒント', '次のヒント']);
+        expect(topic.note, 'メモ');
+      },
+    );
+
+    testWidgets('topic form exposes required field semantics', (tester) async {
+      final store = await ready(storage: MemoryStorage(appData()));
+      await tester.pumpWidget(MaterialApp(home: TopicFormScreen(store: store)));
+
+      expect(find.bySemanticsLabel('タイトル（必須）'), findsOneWidget);
+      expect(find.bySemanticsLabel('最初のひとこと（必須）'), findsOneWidget);
+      expect(find.text('タイトル'), findsNothing);
+      expect(find.text('最初のひとこと'), findsNothing);
     });
 
     test(
@@ -754,7 +991,7 @@ void main() {
             id: builtin.id,
             title: 'x',
             categoryId: 'other',
-            description: '',
+            note: '',
           ),
           isFalse,
         );
@@ -860,11 +1097,7 @@ void main() {
           appData(favoriteIds: <String>{'custom-1'}),
         );
         final store = await ready(storage: storage);
-        await store.addTopic(
-          title: 'new',
-          categoryId: 'other',
-          description: '',
-        );
+        await store.addTopic(title: 'new', categoryId: 'other', note: '');
         expect(store.customTopics.single.id, isNot('custom-1'));
       },
     );
@@ -1026,7 +1259,7 @@ void main() {
       expect(find.byType(NavigationBar), findsOneWidget);
     });
 
-    testWidgets('form creates, v4 saves, edit keeps the topic and reloads', (
+    testWidgets('form creates, v5 saves, edit keeps the topic and reloads', (
       tester,
     ) async {
       final store = await ready();
@@ -1040,18 +1273,25 @@ void main() {
       await tester.tap(find.byType(DropdownButtonFormField<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text(categories.first.name).last);
-      await tester.enterText(fields.at(1), 'memo');
-      await tester.tap(find.byType(FilledButton));
+      await tester.enterText(fields.at(1), 'createdについて、どう思いますか？');
+      await tester.enterText(fields.at(2), 'memo');
+      await tester.drag(
+        find.byKey(const Key('topic-form-list')),
+        const Offset(0, -700),
+      );
+      await tester.pumpAndSettle();
+      final save = find.text('話題を保存する');
+      await tester.tap(save);
       await tester.pumpAndSettle();
       final id = store.customTopics.single.id;
-      expect(store.topicById(id)!.description, 'memo');
+      expect(store.topicById(id)!.note, 'memo');
       final restored = await ready();
       expect(restored.topicById(id)!.title, 'created');
       await store.updateTopic(
         id: id,
         title: 'edited',
         categoryId: 'other',
-        description: 'memo',
+        note: 'memo',
       );
       expect(store.customTopics, hasLength(1));
       expect(store.topicById(id)!.title, 'edited');
@@ -1072,7 +1312,7 @@ void main() {
       );
       expect(find.byType(Chip), findsOneWidget);
       expect(find.byIcon(Icons.chat_bubble_outline), findsOneWidget);
-      expect(find.text(builtin.description), findsOneWidget);
+      expect(find.text(builtin.openingQuestion), findsOneWidget);
       await tester.tap(find.byType(FilledButton));
       await tester.pump();
       expect(
@@ -1086,7 +1326,7 @@ void main() {
         storage: MemoryStorage(
           appData(
             customTopics: <Topic>[
-              custom('memo', title: 'memo title', description: 'memo body'),
+              custom('memo', title: 'memo title', note: 'memo body'),
             ],
           ),
         ),
@@ -1115,7 +1355,7 @@ void main() {
           id: 'mine',
           title: 'edited mine',
           categoryId: 'other',
-          description: '',
+          note: '',
         );
         expect(store.customTopics.single.title, 'edited mine');
         expect(store.topicById('mine'), isNotNull);
@@ -1175,7 +1415,7 @@ void main() {
 
         final v2 = jsonEncode(<String, Object>{
           'schemaVersion': 2,
-          'customTopics': <Object>[custom('from-v2').toJson()],
+          'customTopics': <Object>[v4TopicJson(custom('from-v2'))],
           'favoriteTopicIds': <String>[],
           'archivedTopicIds': <String>[],
           'persons': <Object>[],
@@ -1278,7 +1518,7 @@ void main() {
         );
         await tester.tap(find.text(topic.title));
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('メモを編集'));
+        await tester.ensureVisible(find.text('メモを編集', skipOffstage: false));
         await tester.pumpAndSettle();
         await tester.tap(find.text('メモを編集'));
         await tester.pumpAndSettle();
@@ -1286,7 +1526,7 @@ void main() {
         await tester.tap(find.byType(TextButton));
         await tester.pumpAndSettle();
         expect(store.personTopic('p', topic.id)!.note, 'old');
-        await tester.ensureVisible(find.text('メモを編集'));
+        await tester.ensureVisible(find.text('メモを編集', skipOffstage: false));
         await tester.pumpAndSettle();
         await tester.tap(find.text('メモを編集'));
         await tester.pumpAndSettle();
@@ -1412,7 +1652,12 @@ void main() {
           find.byType(TextFormField).at(0),
           'edited custom',
         );
-        await tester.tap(find.byType(FilledButton));
+        await tester.drag(
+          find.byKey(const Key('topic-form-list')),
+          const Offset(0, -900),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('保存'));
         await tester.pumpAndSettle();
         expect(store.customTopics, hasLength(1));
         expect(find.text('edited custom'), findsOneWidget);
@@ -1564,13 +1809,15 @@ void main() {
     );
 
     testWidgets(
-      'Topics searches title description and category, combines filters, sorts, and clears all conditions',
+      'Topics searches title, opening question, hints, note and category',
       (tester) async {
         final alpha = Topic(
           id: 'alpha',
           title: 'Alpha unique',
           categoryId: 'work',
-          description: 'first description',
+          openingQuestion: 'alpha opening match',
+          talkingPoints: const <String>['alpha hint match'],
+          note: 'alpha note match',
           source: TopicSource.userCreated,
           createdAt: DateTime.utc(2026),
         );
@@ -1578,7 +1825,9 @@ void main() {
           id: 'zebra',
           title: 'Zebra unique',
           categoryId: 'work',
-          description: 'description token',
+          openingQuestion: 'zebra opening token',
+          talkingPoints: const <String>['zebra hint token'],
+          note: 'zebra note token',
           source: TopicSource.userCreated,
           createdAt: DateTime.utc(2026),
         );
@@ -1595,9 +1844,21 @@ void main() {
         await tester.enterText(search, 'Alpha unique');
         await tester.pump();
         expect(find.text('Alpha unique').last, findsOneWidget);
-        await tester.enterText(search, 'description token');
+        for (final token in <String>[
+          'opening token',
+          'hint token',
+          'note token',
+        ]) {
+          await tester.enterText(search, token);
+          await tester.pump();
+          expect(find.text('Zebra unique'), findsOneWidget);
+        }
+        await tester.enterText(search, store.categoryName(zebra.categoryId));
         await tester.pump();
-        expect(find.text('Zebra unique'), findsOneWidget);
+        final firstWorkTopic = createStaticTopics().firstWhere(
+          (topic) => topic.categoryId == zebra.categoryId,
+        );
+        expect(find.text(firstWorkTopic.title), findsOneWidget);
         await tester.enterText(search, '仕事');
         await tester.pump();
         expect(find.text('今どんな仕事をしているか'), findsOneWidget);
@@ -1638,7 +1899,9 @@ void main() {
       final topic = custom(
         'pick',
         title: 'picker zebra',
-        description: 'picker description',
+        openingQuestion: 'picker opening',
+        talkingPoints: const <String>['picker hint'],
+        note: 'picker note',
       );
       final alpha = custom('pick-alpha', title: 'picker alpha');
       final person = Person(
@@ -1660,7 +1923,7 @@ void main() {
           home: TopicPickerScreen(store: store, personId: person.id),
         ),
       );
-      await tester.enterText(find.byType(TextField), 'description');
+      await tester.enterText(find.byType(TextField), 'picker opening');
       await tester.pump();
       expect(find.text('picker zebra'), findsOneWidget);
       await tester.enterText(find.byType(TextField), 'picker');
@@ -2115,7 +2378,11 @@ void main() {
           note: '',
           createdAt: DateTime.utc(2026),
         );
-        final topic = custom('narrow-picker', title: 'narrow picker');
+        final topic = custom(
+          'narrow-picker',
+          title: 'narrow picker',
+          openingQuestion: '狭い画面でも折り返して表示される長い会話開始文です。',
+        );
         final store = await ready(
           storage: MemoryStorage(
             appData(customTopics: <Topic>[topic], persons: <Person>[person]),
@@ -2128,6 +2395,7 @@ void main() {
         );
         await tester.enterText(find.byType(TextField), topic.title);
         await tester.pump();
+        expect(find.text(topic.openingQuestion), findsOneWidget);
         await tester.tap(find.text(topic.title).last);
         await tester.pump();
         expect(find.text('1件を追加'), findsOneWidget);
@@ -2232,7 +2500,9 @@ void main() {
       final topic = custom(
         'detail-topic',
         title: 'Detail topic',
-        description: 'Shared description',
+        openingQuestion: 'Shared opening question',
+        talkingPoints: const <String>['Shared hint'],
+        note: 'Shared note',
       );
       final storage = MemoryStorage(
         appData(
@@ -2397,6 +2667,8 @@ void main() {
         await tester.tap(find.text(fixture.topic.title));
         await tester.pumpAndSettle();
         expect(find.byType(PersonTopicDetailScreen), findsOneWidget);
+        await tester.drag(find.byType(ListView), const Offset(0, -500));
+        await tester.pumpAndSettle();
         expect(find.text('Initial relation note'), findsOneWidget);
       },
     );
@@ -2694,7 +2966,16 @@ void main() {
         note: 'A note that can wrap at a large text scale.',
         createdAt: DateTime.utc(2026),
       );
-      final topic = custom('narrow-person-topic', title: 'Narrow topic');
+      final topic = custom(
+        'narrow-person-topic',
+        title: 'Narrow topic',
+        openingQuestion: '大きな文字でも折り返して表示される、少し長い最初のひとことです。',
+        talkingPoints: const <String>[
+          '最初のヒントは長めの文章です。',
+          '次のヒントも表示します。',
+          '三つ目のヒントです。',
+        ],
+      );
       final store = await ready(
         storage: MemoryStorage(
           appData(
@@ -2721,6 +3002,10 @@ void main() {
       );
       await tester.pumpWidget(detailApp(const TextScaler.linear(2)));
       await tester.pumpAndSettle();
+      expect(find.text('大きな文字でも折り返して表示される、少し長い最初のひとことです。'), findsOneWidget);
+      expect(find.text('・最初のヒントは長めの文章です。'), findsOneWidget);
+      expect(find.text('・次のヒントも表示します。'), findsOneWidget);
+      expect(find.text('ほか 1件'), findsOneWidget);
       expect(
         MediaQuery.textScalerOf(tester.element(find.byType(TabBar))),
         const TextScaler.linear(2),
@@ -2746,7 +3031,7 @@ void main() {
           id: 'filter-alpha',
           title: 'Alpha filter',
           categoryId: 'work',
-          description: '',
+          note: '',
           source: TopicSource.userCreated,
           createdAt: DateTime.utc(2026),
         );
@@ -2864,6 +3149,10 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('美容').last);
       await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(TextFormField).at(1),
+        '美容について、どう思いますか？',
+      );
       await tester.tap(find.text('話題を保存する'));
       await tester.pumpAndSettle();
 
@@ -2877,7 +3166,7 @@ void main() {
         id: 'beauty-topic',
         title: '美容の話題',
         categoryId: 'beauty',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );
@@ -2885,7 +3174,7 @@ void main() {
         id: 'work-topic',
         title: '仕事の話題',
         categoryId: 'work',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );
@@ -2935,7 +3224,7 @@ void main() {
         id: 'beauty-picker-topic',
         title: '美容の話題',
         categoryId: 'beauty',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );
@@ -2943,7 +3232,7 @@ void main() {
         id: 'other-picker-topic',
         title: 'その他の話題',
         categoryId: 'other',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );

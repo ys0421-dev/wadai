@@ -383,7 +383,7 @@ class _TopicsScreenState extends State<TopicsScreen> {
           (topic) =>
               (categoryId == null || topic.categoryId == categoryId) &&
               (query.isEmpty ||
-                  '${topic.title} ${topic.description} ${widget.store.categoryName(topic.categoryId)}'
+                  '${topic.title} ${topic.openingQuestion} ${topic.talkingPoints.join(' ')} ${topic.note} ${widget.store.categoryName(topic.categoryId)}'
                       .toLowerCase()
                       .contains(query)),
         )

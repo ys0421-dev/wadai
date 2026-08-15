@@ -34,9 +34,6 @@ class TopicDetailScreen extends StatelessWidget {
       }
       final favorite = store.isFavorite(topic.id);
       final archived = store.isArchived(topic.id);
-      final prompt = topic.isCustom
-          ? '「${topic.title}」について話してみましょう。'
-          : topic.description;
       return Scaffold(
         appBar: AppBar(
           title: const Text('話題の詳細'),
@@ -127,14 +124,16 @@ class TopicDetailScreen extends StatelessWidget {
                         Icon(Icons.chat_bubble_outline, size: 19),
                         SizedBox(width: 8),
                         Text(
-                          '会話のきっかけ',
+                          '最初のひとこと',
                           style: TextStyle(fontWeight: FontWeight.w800),
                         ),
                       ],
                     ),
                     const SizedBox(height: 16),
                     Text(
-                      prompt,
+                      topic.openingQuestion.trim().isEmpty
+                          ? '最初のひとことは未設定です。'
+                          : topic.openingQuestion,
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w800,
                         height: 1.55,
@@ -144,7 +143,27 @@ class TopicDetailScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              if (topic.isCustom && topic.description.trim().isNotEmpty) ...[
+              if (topic.talkingPoints.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                const Text(
+                  '話を広げるヒント',
+                  style: TextStyle(
+                    color: appSecondaryTextColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ...topic.talkingPoints.map(
+                  (point) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      '・$point',
+                      style: const TextStyle(height: 1.65, fontSize: 16),
+                    ),
+                  ),
+                ),
+              ],
+              if (topic.note.trim().isNotEmpty) ...[
                 const SizedBox(height: 24),
                 const Text(
                   'メモ',
@@ -155,7 +174,7 @@ class TopicDetailScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  topic.description,
+                  topic.note,
                   style: const TextStyle(height: 1.65, fontSize: 16),
                 ),
               ],

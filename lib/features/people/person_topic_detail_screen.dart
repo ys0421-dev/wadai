@@ -60,9 +60,18 @@ class _PersonTopicDetailScreenState extends State<PersonTopicDetailScreen> {
                           padding: EdgeInsets.only(top: 8),
                           child: Chip(label: Text('アーカイブ済み')),
                         ),
-                      if (topic.description.trim().isNotEmpty) ...[
+                      if (topic.openingQuestion.trim().isNotEmpty) ...[
                         const SizedBox(height: 8),
-                        Text(topic.description),
+                        const Text(
+                          '最初のひとこと',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(topic.openingQuestion),
+                      ],
+                      if (topic.talkingPoints.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        ...topic.talkingPoints.map((point) => Text('・$point')),
                       ],
                       const SizedBox(height: 12),
                       OutlinedButton.icon(

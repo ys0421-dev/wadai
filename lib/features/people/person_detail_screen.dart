@@ -511,13 +511,25 @@ class _PersonTopicCard extends StatelessWidget {
                     const Icon(Icons.chevron_right),
                   ],
                 ),
-                if (topic.description.trim().isNotEmpty) ...[
+                if (topic.openingQuestion.trim().isNotEmpty) ...[
                   const SizedBox(height: 4),
-                  Text(
-                    topic.description,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  Text(topic.openingQuestion),
+                ],
+                if (topic.talkingPoints.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  ...topic.talkingPoints
+                      .take(2)
+                      .map(
+                        (point) => Padding(
+                          padding: const EdgeInsets.only(bottom: 2),
+                          child: Text('・$point'),
+                        ),
+                      ),
+                  if (topic.talkingPoints.length > 2)
+                    Text(
+                      'ほか ${topic.talkingPoints.length - 2}件',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                 ],
                 Wrap(
                   spacing: 6,

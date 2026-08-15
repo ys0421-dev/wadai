@@ -106,16 +106,24 @@ class WadeeController extends ChangeNotifier {
   Future<bool> addTopic({
     required String title,
     required String categoryId,
-    required String description,
+    String? openingQuestion,
+    Iterable<String> talkingPoints = const <String>[],
+    String note = '',
   }) => _enqueueMutation((state) {
+    final trimmedTitle = title.trim();
+    final trimmedQuestion =
+        (openingQuestion ?? Topic.fallbackOpeningQuestion(trimmedTitle)).trim();
+    if (trimmedTitle.isEmpty || trimmedQuestion.isEmpty) return null;
     final candidate = state.copy();
     final now = DateTime.now();
     candidate.allTopics.add(
       Topic(
         id: _nextId('custom', candidate, now),
-        title: title,
-        categoryId: categoryId,
-        description: description,
+        title: trimmedTitle,
+        categoryId: categoryId.trim(),
+        openingQuestion: trimmedQuestion,
+        talkingPoints: _normalizedTalkingPoints(talkingPoints),
+        note: note.trim(),
         source: TopicSource.userCreated,
         createdAt: now,
       ),
@@ -127,7 +135,9 @@ class WadeeController extends ChangeNotifier {
     required String id,
     required String title,
     required String categoryId,
-    required String description,
+    String? openingQuestion,
+    Iterable<String> talkingPoints = const <String>[],
+    String note = '',
   }) => _enqueueMutation((state) {
     final index = state.allTopics.indexWhere((topic) => topic.id == id);
     if (index == -1 ||
@@ -135,14 +145,26 @@ class WadeeController extends ChangeNotifier {
         state.allTopics[index].source != TopicSource.userCreated) {
       return null;
     }
+    final trimmedTitle = title.trim();
+    final trimmedQuestion =
+        (openingQuestion ?? Topic.fallbackOpeningQuestion(trimmedTitle)).trim();
+    if (trimmedTitle.isEmpty || trimmedQuestion.isEmpty) return null;
     final candidate = state.copy();
     candidate.allTopics[index] = candidate.allTopics[index].copyWith(
-      title: title,
-      categoryId: categoryId,
-      description: description,
+      title: trimmedTitle,
+      categoryId: categoryId.trim(),
+      openingQuestion: trimmedQuestion,
+      talkingPoints: _normalizedTalkingPoints(talkingPoints),
+      note: note.trim(),
     );
     return candidate;
   });
+
+  static List<String> _normalizedTalkingPoints(Iterable<String> values) =>
+      values
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toList(growable: false);
 
   Future<bool> archiveTopic(String id) => _enqueueMutation((state) {
     if (!state.hasTopic(id) || state.archivedIds.contains(id)) return null;
