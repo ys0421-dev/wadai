@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -1167,7 +1168,6 @@ void main() {
         expect(store.customTopics.single.id, isNot('custom-1'));
       },
     );
-
   });
 
   group('additional persisted-state edge cases', () {
@@ -4440,6 +4440,14 @@ void main() {
   });
 
   group('local AI suggestions', () {
+    test('local AI runtime supports Android arm64 only', () {
+      expect(supportsLocalAIAbi(ffi.Abi.androidArm64), isTrue);
+      expect(supportsLocalAIAbi(ffi.Abi.androidArm), isFalse);
+      expect(supportsLocalAIAbi(ffi.Abi.androidIA32), isFalse);
+      expect(supportsLocalAIAbi(ffi.Abi.androidX64), isFalse);
+      expect(supportsLocalAIAbi(ffi.Abi.androidRiscv64), isFalse);
+    });
+
     test(
       'prompt includes structured profile, person history and cross-category seeds',
       () {
