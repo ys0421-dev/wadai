@@ -156,7 +156,11 @@ class WadeeController extends ChangeNotifier {
     return candidate;
   });
 
-  Future<String?> addPerson({required String displayName, String note = ''}) {
+  Future<String?> addPerson({
+    required String displayName,
+    String note = '',
+    PersonProfile profile = const PersonProfile(),
+  }) {
     final trimmed = displayName.trim();
     if (trimmed.isEmpty || loadState != AppLoadState.ready) {
       return Future<String?>.value(null);
@@ -166,7 +170,13 @@ class WadeeController extends ChangeNotifier {
       final now = DateTime.now();
       final id = _nextId('person', candidate, now);
       candidate.persons.add(
-        Person(id: id, displayName: trimmed, note: note, createdAt: now),
+        Person(
+          id: id,
+          displayName: trimmed,
+          note: note.trim(),
+          createdAt: now,
+          profile: profile.normalized(),
+        ),
       );
       return _ValueCandidate<String>(candidate, id);
     });
@@ -176,6 +186,7 @@ class WadeeController extends ChangeNotifier {
     required String id,
     required String displayName,
     required String note,
+    PersonProfile? profile,
   }) {
     final trimmed = displayName.trim();
     if (trimmed.isEmpty) return Future<bool>.value(false);
@@ -185,7 +196,8 @@ class WadeeController extends ChangeNotifier {
       final candidate = state.copy();
       candidate.persons[index] = candidate.persons[index].copyWith(
         displayName: trimmed,
-        note: note,
+        note: note.trim(),
+        profile: (profile ?? state.persons[index].profile).normalized(),
       );
       return candidate;
     });

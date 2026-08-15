@@ -10,6 +10,7 @@ import 'package:wadai/data/topic_catalog.dart';
 import 'package:wadai/data/local_app_storage.dart';
 import 'package:wadai/features/people/people_screen.dart';
 import 'package:wadai/features/people/person_detail_screen.dart';
+import 'package:wadai/features/people/person_form_screen.dart';
 import 'package:wadai/features/people/person_topic_detail_screen.dart';
 import 'package:wadai/features/people/topic_picker_screen.dart';
 import 'package:wadai/features/topics/topics_screen.dart';
@@ -136,8 +137,245 @@ Future<void> applyTopicFilters(
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
+  group('person profile', () {
+    test(
+      'profile JSON round trips, trims text, and is saved by the controller',
+      () async {
+        final profile = PersonProfile(
+          relationship: PersonRelationship.friend,
+          closeness: PersonCloseness.casual,
+          ageGroup: PersonAgeGroup.thirties,
+          interests: '  音楽  ',
+          workOrSchool: ' デザイン ',
+          recentEvents: ' 展示会 ',
+          likelyInterests: ' 映画 ',
+          commonTopics: ' ライブ ',
+          topicsToAvoid: ' 政治 ',
+          nextQuestions: ' 次の展示 ',
+        );
+        final person = Person(
+          id: 'profile-person',
+          displayName: 'Profile person',
+          note: '',
+          createdAt: DateTime.utc(2026),
+          profile: profile,
+        );
+
+        final decoded = Person.fromJson(person.toJson());
+        expect(decoded.profile.interests, '音楽');
+        expect(decoded.profile.orderedEntries.first.key, '関係性');
+        expect(decoded.profile.toStructuredMap()['次に聞きたいこと'], '次の展示');
+
+        final storage = MemoryStorage(appData());
+        final store = await ready(storage: storage);
+        final id = await store.addPerson(
+          displayName: ' P ',
+          note: ' note ',
+          profile: profile,
+        );
+        expect(id, isNotNull);
+        expect(store.personById(id!)!.note, 'note');
+        expect(store.personById(id)!.profile.interests, '音楽');
+        expect(storage.data.persons.single.profile.commonTopics, 'ライブ');
+      },
+    );
+
+    test(
+      'v3 people migrate to v4 with an empty profile and retain status',
+      () async {
+        final topic = createStaticTopics().first;
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          LocalAppStorage.snapshotKey: jsonEncode(<String, Object>{
+            'schemaVersion': 3,
+            'customTopics': <Object>[],
+            'favoriteTopicIds': <String>[topic.id],
+            'archivedTopicIds': <String>[],
+            'persons': <Object>[
+              <String, Object>{
+                'id': 'legacy-person',
+                'displayName': 'Legacy',
+                'note': 'memo',
+                'createdAt': DateTime.utc(2026).toIso8601String(),
+              },
+            ],
+            'personTopics': <Object>[
+              <String, Object>{
+                'personId': 'legacy-person',
+                'topicId': topic.id,
+                'note': 'relation memo',
+                'status': 'revisit',
+                'createdAt': DateTime.utc(2026).toIso8601String(),
+              },
+            ],
+          }),
+        });
+
+        final store = await ready();
+        final prefs = await SharedPreferences.getInstance();
+        final snapshot =
+            jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
+                as Map<String, dynamic>;
+        expect(snapshot['schemaVersion'], 4);
+        expect(store.personById('legacy-person')!.profile.isEmpty, isTrue);
+        expect(
+          store.personTopic('legacy-person', topic.id)!.status,
+          PersonTopicStatus.revisit,
+        );
+        expect(store.isFavorite(topic.id), isTrue);
+      },
+    );
+
+    test('v4 snapshot reload preserves every profile field', () async {
+      const profile = PersonProfile(
+        relationship: PersonRelationship.supervisor,
+        closeness: PersonCloseness.close,
+        ageGroup: PersonAgeGroup.fifties,
+        interests: 'ジャズと登山',
+        workOrSchool: 'プロダクトデザイン',
+        recentEvents: '展示会を開催した',
+        likelyInterests: '建築と写真',
+        commonTopics: '週末の散歩',
+        topicsToAvoid: '体調の話',
+        nextQuestions: '次に行く展覧会',
+      );
+      final person = Person(
+        id: 'v4-profile-person',
+        displayName: 'V4 person',
+        note: 'memo',
+        createdAt: DateTime.utc(2026),
+        profile: profile,
+      );
+      final storage = LocalAppStorage();
+
+      await storage.saveSnapshot(
+        customTopics: const <Topic>[],
+        favoriteIds: const <String>[],
+        archivedIds: const <String>[],
+        persons: <Person>[person],
+        personTopics: const <PersonTopic>[],
+      );
+
+      final reloaded = await LocalAppStorage().load();
+      final savedProfile = reloaded.persons.single.profile;
+      expect(savedProfile.relationship, PersonRelationship.supervisor);
+      expect(savedProfile.closeness, PersonCloseness.close);
+      expect(savedProfile.ageGroup, PersonAgeGroup.fifties);
+      expect(savedProfile.interests, 'ジャズと登山');
+      expect(savedProfile.workOrSchool, 'プロダクトデザイン');
+      expect(savedProfile.recentEvents, '展示会を開催した');
+      expect(savedProfile.likelyInterests, '建築と写真');
+      expect(savedProfile.commonTopics, '週末の散歩');
+      expect(savedProfile.topicsToAvoid, '体調の話');
+      expect(savedProfile.nextQuestions, '次に行く展覧会');
+    });
+
+    testWidgets('profile form and detail are usable at 320px with large text', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final store = await ready(storage: MemoryStorage(appData()));
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: PersonFormScreen(store: store),
+        ),
+      );
+      expect(
+        find.text('名前だけで登録できます。プロフィールを追加すると、AIの提案がより相手に合いやすくなります。'),
+        findsOneWidget,
+      );
+      final profileExpansion = find.text('プロフィールを追加（任意）');
+      await tester.drag(find.byType(ListView), const Offset(0, -360));
+      await tester.pumpAndSettle();
+      await tester.tap(profileExpansion);
+      await tester.pumpAndSettle();
+      expect(find.text('基本'), findsOneWidget);
+      expect(find.text('会話のヒント'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      final person = Person(
+        id: 'detail-profile',
+        displayName: '相手',
+        note: '会話の全般メモ',
+        createdAt: DateTime.utc(2026),
+        profile: const PersonProfile(
+          relationship: PersonRelationship.colleague,
+          closeness: PersonCloseness.casual,
+          ageGroup: PersonAgeGroup.thirties,
+          interests: '読書',
+          workOrSchool: '企画部',
+          recentEvents: '引っ越した',
+          likelyInterests: '映画',
+          commonTopics: '散歩',
+          topicsToAvoid: '政治',
+          nextQuestions: '最近読んだ本',
+        ),
+      );
+      final detailStore = await ready(
+        storage: MemoryStorage(appData(persons: <Person>[person])),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: PersonDetailScreen(store: detailStore, personId: person.id),
+        ),
+      );
+      for (final value in <String>[
+        '同僚',
+        '気軽に話せる',
+        '30代',
+        '読書',
+        '企画部',
+        '引っ越した',
+        '映画',
+        '散歩',
+        '政治',
+        '最近読んだ本',
+        '会話の全般メモ',
+      ]) {
+        expect(find.text(value), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('empty profile CTA opens the profile section expanded', (
+      tester,
+    ) async {
+      final person = Person(
+        id: 'empty-profile',
+        displayName: 'Empty profile',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final store = await ready(
+        storage: MemoryStorage(appData(persons: <Person>[person])),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PersonDetailScreen(store: store, personId: person.id),
+        ),
+      );
+
+      await tester.tap(find.text('プロフィールを追加'));
+      await tester.pumpAndSettle();
+      expect(find.text('プロフィールを追加（任意）'), findsOneWidget);
+      expect(find.text('基本'), findsOneWidget);
+    });
+  });
+
   group('migration and validation', () {
-    test('v1 migrates to v3 and preserves favorites', () async {
+    test('v1 migrates to v4 and preserves favorites', () async {
       final builtin = createStaticTopics().first;
       SharedPreferences.setMockInitialValues(<String, Object>{
         LocalAppStorage.snapshotKey: jsonEncode(<String, Object>{
@@ -162,7 +400,7 @@ void main() {
         jsonDecode(
           prefs.getString(LocalAppStorage.snapshotKey)!,
         )['schemaVersion'],
-        3,
+        4,
       );
       expect(store.isFavorite('old'), isTrue);
       expect(store.isFavorite(builtin.id), isTrue);
@@ -232,7 +470,7 @@ void main() {
     });
 
     test(
-      'v2 person-topic data migrates planned status into one v3 snapshot',
+      'v2 person-topic data migrates planned status into one v4 snapshot',
       () async {
         final builtin = createStaticTopics().first;
         final raw = jsonEncode(<String, Object>{
@@ -266,7 +504,7 @@ void main() {
         final snapshot =
             jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
                 as Map<String, dynamic>;
-        expect(snapshot['schemaVersion'], 3);
+        expect(snapshot['schemaVersion'], 4);
         expect(
           (snapshot['personTopics'] as List<dynamic>).single['status'],
           'planned',
@@ -788,7 +1026,7 @@ void main() {
       expect(find.byType(NavigationBar), findsOneWidget);
     });
 
-    testWidgets('form creates, v3 saves, edit keeps the topic and reloads', (
+    testWidgets('form creates, v4 saves, edit keeps the topic and reloads', (
       tester,
     ) async {
       final store = await ready();
@@ -1859,7 +2097,7 @@ void main() {
       await tester.tap(find.text('2件を追加'));
       await tester.pumpAndSettle();
       expect(find.byType(TopicPickerScreen), findsNothing);
-      expect(find.text('相手全般のメモ'), findsOneWidget);
+      expect(find.text('全般メモ'), findsOneWidget);
       expect(find.text(first.title), findsOneWidget);
       expect(find.text(second.title), findsOneWidget);
       expect(storage.saveCalls, 1);

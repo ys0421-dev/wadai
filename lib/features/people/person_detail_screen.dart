@@ -59,6 +59,7 @@ class PersonDetailScreen extends StatelessWidget {
         ),
         body: assigned.isEmpty
             ? _EmptyPersonTopicsBody(
+                store: store,
                 person: person,
                 onAddTopic: () => _pickTopic(context, person.id),
               )
@@ -117,10 +118,12 @@ class PersonDetailScreen extends StatelessWidget {
 
 class _EmptyPersonTopicsBody extends StatelessWidget {
   const _EmptyPersonTopicsBody({
+    required this.store,
     required this.person,
     required this.onAddTopic,
   });
 
+  final WadeeController store;
   final Person person;
   final VoidCallback onAddTopic;
 
@@ -128,7 +131,7 @@ class _EmptyPersonTopicsBody extends StatelessWidget {
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
     children: [
-      _PersonProfileCard(person: person),
+      _PersonProfileCard(store: store, person: person),
       const SizedBox(height: 24),
       _TopicsHeading(count: 0),
       const SizedBox(height: 8),
@@ -193,7 +196,7 @@ class _PersonTopicsBody extends StatelessWidget {
                 children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                    child: _PersonProfileCard(person: person),
+                    child: _PersonProfileCard(store: store, person: person),
                   ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
@@ -241,40 +244,85 @@ class _PersonTopicsBody extends StatelessWidget {
 }
 
 class _PersonProfileCard extends StatelessWidget {
-  const _PersonProfileCard({required this.person});
+  const _PersonProfileCard({required this.store, required this.person});
 
+  final WadeeController store;
   final Person person;
 
   @override
   Widget build(BuildContext context) => Card(
     child: Padding(
       padding: const EdgeInsets.all(16),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InitialAvatar(displayName: person.displayName, radius: 28),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              InitialAvatar(displayName: person.displayName, radius: 28),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
                   person.displayName,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                const SizedBox(height: 8),
-                Text('相手全般のメモ', style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 4),
-                Text(
-                  person.note.trim().isEmpty ? '全般メモはありません。' : person.note,
-                  style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (person.profile.isEmpty) ...[
+            const Text('プロフィールを追加すると、AIの提案がより相手に合いやすくなります。'),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (_) => PersonFormScreen(
+                    store: store,
+                    person: person,
+                    initiallyExpandProfile: true,
+                  ),
                 ),
-              ],
+              ),
+              icon: const Icon(Icons.person_add_alt_1_outlined),
+              label: const Text('プロフィールを追加'),
             ),
+          ] else ...[
+            Text('プロフィール', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 8),
+            ...person.profile.orderedEntries.map(
+              (entry) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _ProfileEntry(label: entry.key, value: entry.value),
+              ),
+            ),
+          ],
+          const SizedBox(height: 6),
+          Text('全般メモ', style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 4),
+          Text(
+            person.note.trim().isEmpty ? '全般メモはありません。' : person.note,
+            style: Theme.of(context).textTheme.bodyMedium,
           ),
         ],
       ),
     ),
+  );
+}
+
+class _ProfileEntry extends StatelessWidget {
+  const _ProfileEntry({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: Theme.of(context).textTheme.labelMedium),
+      const SizedBox(height: 2),
+      Text(value, style: Theme.of(context).textTheme.bodyMedium),
+    ],
   );
 }
 
