@@ -1,5 +1,9 @@
 # WADEE
 
+## ローカルAIランタイムのUTF-8パッチ
+
+ローカルAIのトークン断片がUTF-8文字の途中で分割されても文字化けしないよう、`lib_llama_cpp` 0.7.3 を `third_party/lib_llama_cpp` にローカルパッチとして保持しています。MITライセンスと出典、パッチ内容は [third_party/lib_llama_cpp/PATCHES.md](third_party/lib_llama_cpp/PATCHES.md) を参照してください。
+
 ## ローカルAIによる話題提案
 
 人物詳細の「AIで話題を提案」から、端末内で会話用の話題候補を4件生成できます。モデルには `Qwen/Qwen2.5-0.5B-Instruct-GGUF` の `qwen2.5-0.5b-instruct-q4_k_m.gguf` を使用します。サイズは 491,400,032 bytes（約491MB）、SHA-256 は `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`、ライセンスは Apache-2.0 です。

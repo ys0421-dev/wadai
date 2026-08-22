@@ -171,11 +171,10 @@ packages:
   lib_llama_cpp:
     dependency: "direct main"
     description:
-      name: lib_llama_cpp
-      sha256: "94cb9dd4cae4e3138be5fb4a666b565f9030d4d053298520628290dcbdf277c6"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.7.3"
+      path: "third_party/lib_llama_cpp"
+      relative: true
+    source: path
+    version: "0.7.3+1"
   lib_llama_cpp_android:
     dependency: transitive
     description:
