@@ -5,6 +5,7 @@ import '../../models/topic.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../state/wadee_controller.dart';
 import 'topic_actions.dart';
+import 'category_icon.dart';
 import 'topic_detail_screen.dart';
 import 'topic_form_screen.dart';
 import 'topic_tile.dart';
@@ -19,6 +20,53 @@ class TopicsScreen extends StatefulWidget {
 
   @override
   State<TopicsScreen> createState() => _TopicsScreenState();
+}
+
+class _TopicListEntry {
+  const _TopicListEntry.header({
+    required this.categoryName,
+    required this.categoryId,
+    required this.count,
+  }) : topic = null;
+
+  const _TopicListEntry.topic(this.topic)
+    : categoryName = null,
+      categoryId = null,
+      count = null;
+
+  final Topic? topic;
+  final String? categoryName;
+  final String? categoryId;
+  final int? count;
+
+  bool get isHeader => topic == null;
+}
+
+enum _EmptyReason { noTopics, search, category, filter }
+
+class _CategoryHeader extends StatelessWidget {
+  const _CategoryHeader({
+    required this.categoryName,
+    required this.categoryId,
+    required this.count,
+  });
+  final String categoryName;
+  final String categoryId;
+  final int count;
+  @override
+  Widget build(BuildContext context) => Padding(
+    key: Key('topic-category-header-$categoryId'),
+    padding: const EdgeInsets.fromLTRB(4, 16, 4, 8),
+    child: Row(
+      children: [
+        Icon(categoryIcon(categoryId), size: 20),
+        const SizedBox(width: 8),
+        Text(categoryName, style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(width: 8),
+        Text('$count件'),
+      ],
+    ),
+  );
 }
 
 class _TopicsScreenState extends State<TopicsScreen> {
@@ -44,10 +92,16 @@ class _TopicsScreenState extends State<TopicsScreen> {
         sort: _sort,
       );
       final hasFilterConditions =
-          _filter != TopicFilter.all ||
-          _categoryId != null ||
-          _sort != _Sort.standard;
+          _filter != TopicFilter.all || _sort != _Sort.standard;
       final hasSearch = _search.text.trim().isNotEmpty;
+      final hasCategory = _categoryId != null;
+      final emptyReason = _emptyReason(
+        base: base,
+        hasSearch: hasSearch,
+        hasCategory: hasCategory,
+        hasDisplayFilter: _filter != TopicFilter.all,
+      );
+      final listEntries = _listEntries(visible);
       return Scaffold(
         appBar: AppBar(title: const Text('話題')),
         floatingActionButton: FloatingActionButton.extended(
@@ -89,6 +143,37 @@ class _TopicsScreenState extends State<TopicsScreen> {
                 ],
               ),
             ),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    ChoiceChip(
+                      key: const Key('topic-category-chip-all'),
+                      label: const Text('すべて'),
+                      selected: _categoryId == null,
+                      onSelected: (_) => setState(() => _categoryId = null),
+                    ),
+                    const SizedBox(width: 8),
+                    ...categories.expand(
+                      (category) => <Widget>[
+                        ChoiceChip(
+                          key: Key('topic-category-chip-${category.id}'),
+                          avatar: Icon(categoryIcon(category.id), size: 18),
+                          label: Text(category.name),
+                          selected: _categoryId == category.id,
+                          onSelected: (_) =>
+                              setState(() => _categoryId = category.id),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
             if (hasFilterConditions)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
@@ -105,47 +190,26 @@ class _TopicsScreenState extends State<TopicsScreen> {
               child: visible.isEmpty
                   ? EmptyState(
                       icon: Icons.forum_outlined,
-                      title: _emptyTitle(base),
-                      message: base.isEmpty
-                          ? _emptyMessage()
-                          : '検索やフィルター条件を変更してください。',
-                      action: hasFilterConditions || hasSearch
-                          ? TextButton(
-                              onPressed: hasFilterConditions
-                                  ? _clearFilters
-                                  : _clearSearch,
-                              child: Text(
-                                hasFilterConditions ? 'フィルターをクリア' : '検索をクリア',
-                              ),
-                            )
-                          : null,
+                      title: _emptyTitle(emptyReason),
+                      message: _emptyMessage(emptyReason),
+                      action: _emptyAction(emptyReason),
                     )
                   : ListView.builder(
+                      key: ValueKey(
+                        'topic-list-${_filter.name}-${_categoryId ?? 'all'}-${_sort.name}-${_search.text}',
+                      ),
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
-                      itemCount: visible.length,
+                      itemCount: listEntries.length,
                       itemBuilder: (context, i) {
-                        final topic = visible[i];
-                        final archived = widget.store.isArchived(topic.id);
-                        return TopicTile(
-                          topic: topic,
-                          categoryName: widget.store.categoryName(
-                            topic.categoryId,
-                          ),
-                          isFavorite: widget.store.isFavorite(topic.id),
-                          archived: archived,
-                          onTap: () => _openDetail(topic.id),
-                          onToggleFavorite: archived
-                              ? null
-                              : () => _toggleFavorite(topic.id),
-                          onEdit: !archived && topic.isCustom
-                              ? () => _openForm(topic: topic)
-                              : null,
-                          onArchive: () => showTopicArchiveDialog(
-                            context: context,
-                            store: widget.store,
-                            topic: topic,
-                          ),
-                        );
+                        final entry = listEntries[i];
+                        if (entry.isHeader) {
+                          return _CategoryHeader(
+                            categoryName: entry.categoryName!,
+                            categoryId: entry.categoryId!,
+                            count: entry.count!,
+                          );
+                        }
+                        return _topicTile(entry.topic!);
                       },
                     ),
             ),
@@ -173,9 +237,7 @@ class _TopicsScreenState extends State<TopicsScreen> {
   );
 
   int get _activeConditionCount =>
-      (_filter == TopicFilter.all ? 0 : 1) +
-      (_categoryId == null ? 0 : 1) +
-      (_sort == _Sort.standard ? 0 : 1);
+      (_filter == TopicFilter.all ? 0 : 1) + (_sort == _Sort.standard ? 0 : 1);
 
   Widget _activeConditions() => Wrap(
     spacing: 8,
@@ -186,11 +248,6 @@ class _TopicsScreenState extends State<TopicsScreen> {
         InputChip(
           label: Text(_filterLabel(_filter)),
           onDeleted: () => setState(() => _filter = TopicFilter.all),
-        ),
-      if (_categoryId != null)
-        InputChip(
-          label: Text(widget.store.categoryName(_categoryId!)),
-          onDeleted: () => setState(() => _categoryId = null),
         ),
       if (_sort != _Sort.standard)
         InputChip(
@@ -204,7 +261,6 @@ class _TopicsScreenState extends State<TopicsScreen> {
 
   Future<void> _openFilters() async {
     var draftFilter = _filter;
-    var draftCategoryId = _categoryId;
     var draftSort = _sort;
     await showModalBottomSheet<void>(
       context: context,
@@ -214,7 +270,7 @@ class _TopicsScreenState extends State<TopicsScreen> {
         builder: (context, setSheetState) {
           final count = _visibleFor(
             filter: draftFilter,
-            categoryId: draftCategoryId,
+            categoryId: _categoryId,
             sort: draftSort,
           ).length;
           return SafeArea(
@@ -269,30 +325,6 @@ class _TopicsScreenState extends State<TopicsScreen> {
                         ),
                         const Divider(),
                         Text(
-                          'カテゴリー',
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                        RadioGroup<String?>(
-                          groupValue: draftCategoryId,
-                          onChanged: (value) =>
-                              setSheetState(() => draftCategoryId = value),
-                          child: Column(
-                            children: [
-                              const RadioListTile<String?>(
-                                value: null,
-                                title: Text('すべて'),
-                              ),
-                              ...categories.map(
-                                (category) => RadioListTile<String?>(
-                                  value: category.id,
-                                  title: Text(category.name),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const Divider(),
-                        Text(
                           '並び順',
                           style: Theme.of(context).textTheme.titleSmall,
                         ),
@@ -324,7 +356,6 @@ class _TopicsScreenState extends State<TopicsScreen> {
                         final clearButton = TextButton(
                           onPressed: () => setSheetState(() {
                             draftFilter = TopicFilter.all;
-                            draftCategoryId = null;
                             draftSort = _Sort.standard;
                           }),
                           child: const Text('条件をクリア'),
@@ -333,7 +364,6 @@ class _TopicsScreenState extends State<TopicsScreen> {
                           onPressed: () {
                             setState(() {
                               _filter = draftFilter;
-                              _categoryId = draftCategoryId;
                               _sort = draftSort;
                             });
                             Navigator.pop(sheetContext);
@@ -372,6 +402,59 @@ class _TopicsScreenState extends State<TopicsScreen> {
           .toList(),
   };
 
+  Widget _topicTile(Topic topic) {
+    final archived = widget.store.isArchived(topic.id);
+    return TopicTile(
+      topic: topic,
+      categoryName: widget.store.categoryName(topic.categoryId),
+      isFavorite: widget.store.isFavorite(topic.id),
+      archived: archived,
+      onTap: () => _openDetail(topic.id),
+      onToggleFavorite: archived ? null : () => _toggleFavorite(topic.id),
+      onEdit: !archived && topic.isCustom
+          ? () => _openForm(topic: topic)
+          : null,
+      onArchive: () => showTopicArchiveDialog(
+        context: context,
+        store: widget.store,
+        topic: topic,
+      ),
+    );
+  }
+
+  List<_TopicListEntry> _listEntries(List<Topic> visible) {
+    if (_categoryId != null) {
+      return <_TopicListEntry>[
+        _TopicListEntry.header(
+          categoryName: widget.store.categoryName(_categoryId!),
+          categoryId: _categoryId!,
+          count: visible.length,
+        ),
+        ...visible.map(_TopicListEntry.topic),
+      ];
+    }
+    if (_sort == _Sort.name) {
+      return visible.map(_TopicListEntry.topic).toList(growable: false);
+    }
+
+    final entries = <_TopicListEntry>[];
+    for (final category in categories) {
+      final topics = visible
+          .where((topic) => topic.categoryId == category.id)
+          .toList(growable: false);
+      if (topics.isEmpty) continue;
+      entries.add(
+        _TopicListEntry.header(
+          categoryName: category.name,
+          categoryId: category.id,
+          count: topics.length,
+        ),
+      );
+      entries.addAll(topics.map(_TopicListEntry.topic));
+    }
+    return entries;
+  }
+
   List<Topic> _visibleFor({
     required TopicFilter filter,
     required String? categoryId,
@@ -383,7 +466,7 @@ class _TopicsScreenState extends State<TopicsScreen> {
           (topic) =>
               (categoryId == null || topic.categoryId == categoryId) &&
               (query.isEmpty ||
-                  '${topic.title} ${topic.description} ${widget.store.categoryName(topic.categoryId)}'
+                  '${topic.title} ${topic.openingQuestion} ${topic.talkingPoints.join(' ')} ${topic.note} ${widget.store.categoryName(topic.categoryId)}'
                       .toLowerCase()
                       .contains(query)),
         )
@@ -413,11 +496,64 @@ class _TopicsScreenState extends State<TopicsScreen> {
 
   void _clearFilters() => setState(() {
     _filter = TopicFilter.all;
-    _categoryId = null;
     _sort = _Sort.standard;
   });
 
-  String _emptyTitle(List<Topic> base) {
+  _EmptyReason _emptyReason({
+    required List<Topic> base,
+    required bool hasSearch,
+    required bool hasCategory,
+    required bool hasDisplayFilter,
+  }) {
+    if (hasSearch) return _EmptyReason.search;
+    if (hasCategory && base.isNotEmpty) return _EmptyReason.category;
+    if (hasDisplayFilter) return _EmptyReason.filter;
+    return _EmptyReason.noTopics;
+  }
+
+  String _emptyTitle(_EmptyReason reason) {
+    if (reason == _EmptyReason.search) return '条件に一致する話題がありません';
+    if (reason == _EmptyReason.category) {
+      return '${widget.store.categoryName(_categoryId!)}の話題がありません';
+    }
+    if (reason == _EmptyReason.filter && _filter == TopicFilter.all) {
+      return '条件に一致する話題がありません';
+    }
+    return _noTopicsTitle();
+  }
+
+  String _emptyMessage(_EmptyReason reason) => switch (reason) {
+    _EmptyReason.search => '検索語を変えるか、検索をクリアしてください。',
+    _EmptyReason.category => '別のカテゴリを選ぶことができます。',
+    _EmptyReason.filter => '表示対象や並び順を変更してください。',
+    _EmptyReason.noTopics => _legacyEmptyMessage(),
+  };
+
+  Widget? _emptyAction(_EmptyReason reason) {
+    switch (reason) {
+      case _EmptyReason.search:
+        return TextButton(onPressed: _clearSearch, child: const Text('検索をクリア'));
+      case _EmptyReason.category:
+        return TextButton(
+          onPressed: () => setState(() => _categoryId = null),
+          child: const Text('すべて'),
+        );
+      case _EmptyReason.filter:
+        return TextButton(
+          onPressed: _clearFilters,
+          child: const Text('フィルターをクリア'),
+        );
+      case _EmptyReason.noTopics:
+        return null;
+    }
+  }
+
+  String _noTopicsTitle() => _legacyEmptyTitle(const <Topic>[]);
+
+  String _legacyEmptyTitle(List<Topic> base) {
+    if (_categoryId != null && base.isNotEmpty) {
+      return '${widget.store.categoryName(_categoryId!)}の話題がありません';
+    }
     if (base.isNotEmpty) return '条件に一致する話題がありません';
     return switch (_filter) {
       TopicFilter.all => '話題がありません',
@@ -427,7 +563,7 @@ class _TopicsScreenState extends State<TopicsScreen> {
     };
   }
 
-  String _emptyMessage() => switch (_filter) {
+  String _legacyEmptyMessage() => switch (_filter) {
     TopicFilter.all => '右下のボタンから話題を追加できます。',
     TopicFilter.favorite => '話題一覧からお気に入りを追加できます。',
     TopicFilter.mine => '右下のボタンから自分用の話題を追加できます。',

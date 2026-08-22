@@ -1,4 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' as ffi;
+import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,18 +12,28 @@ import 'package:wadai/app/app_theme.dart';
 import 'package:wadai/app/app_shell.dart';
 import 'package:wadai/app/wadai_app.dart';
 import 'package:wadai/data/topic_catalog.dart';
+import 'package:wadai/data/topic_seed_catalog.dart';
 import 'package:wadai/data/local_app_storage.dart';
 import 'package:wadai/features/people/people_screen.dart';
 import 'package:wadai/features/people/person_detail_screen.dart';
+import 'package:wadai/features/people/person_form_screen.dart';
 import 'package:wadai/features/people/person_topic_detail_screen.dart';
 import 'package:wadai/features/people/topic_picker_screen.dart';
 import 'package:wadai/features/topics/topics_screen.dart';
 import 'package:wadai/features/topics/topic_detail_screen.dart';
+import 'package:wadai/features/topics/topic_form_screen.dart';
 import 'package:wadai/features/topics/topic_tile.dart';
 import 'package:wadai/features/topics/category_icon.dart';
+import 'package:wadai/features/ai/local_ai_service.dart';
+import 'package:wadai/features/ai/local_model_manager.dart';
+import 'package:wadai/features/ai/ai_suggestion_screen.dart';
+import 'package:lib_llama_cpp/lib_llama_cpp.dart';
+import 'package:lib_llama_cpp_platform_interface/lib_llama_cpp_platform_interface.dart';
 import 'package:wadai/models/person.dart';
 import 'package:wadai/models/person_topic.dart';
 import 'package:wadai/models/topic.dart';
+import 'package:wadai/models/topic_seed.dart';
+import 'package:wadai/models/topic_draft.dart';
 import 'package:wadai/state/wadee_controller.dart';
 
 class MemoryStorage extends LocalAppStorage {
@@ -62,6 +77,73 @@ class MemoryStorage extends LocalAppStorage {
   }
 }
 
+class _FakeLlamaEngine implements LlamaEngine {
+  _FakeLlamaEngine(this.responses);
+  final List<LlamaResponse> responses;
+  final commands = <LlamaCommand>[];
+
+  @override
+  Stream<LlamaResponse> transform(
+    Stream<LlamaCommand> commands, {
+    LlamaState initialState = const LlamaState.empty(),
+    LlamaCppLibraryRequest libraryRequest = const LlamaCppLibraryRequest(),
+  }) async* {
+    await for (final command in commands) {
+      this.commands.add(command);
+    }
+    yield* Stream<LlamaResponse>.fromIterable(responses);
+  }
+}
+
+class _FakeLocalAIService implements LocalAIService {
+  _FakeLocalAIService({this.result, this.error});
+
+  LocalAIResult? result;
+  Object? error;
+  int calls = 0;
+  LocalAIRequest? lastRequest;
+
+  @override
+  Future<LocalAIResult> suggest(
+    LocalAIRequest request, {
+    required void Function(LocalAIProgress progress) onProgress,
+  }) async {
+    calls++;
+    lastRequest = request;
+    onProgress(const LocalAIProgress(LocalAIStage.loadingModel));
+    if (error != null) throw error!;
+    onProgress(const LocalAIProgress(LocalAIStage.generating));
+    return result!;
+  }
+}
+
+class _ReadyModelManager extends LocalModelManager {
+  _ReadyModelManager();
+
+  @override
+  LocalModelStatus get status => const LocalModelStatus(LocalModelState.ready);
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<File> modelFile() async => File('fake.gguf');
+
+  @override
+  Future<bool> download() async => true;
+}
+
+class SaveFailStorage extends LocalAppStorage {
+  @override
+  Future<void> saveSnapshot({
+    required List<Topic> customTopics,
+    required Iterable<String> favoriteIds,
+    required Iterable<String> archivedIds,
+    required List<Person> persons,
+    required List<PersonTopic> personTopics,
+  }) => Future<void>.error(StateError('save failure'));
+}
+
 LocalAppData appData({
   List<Topic> customTopics = const <Topic>[],
   Set<String> favoriteIds = const <String>{},
@@ -78,15 +160,31 @@ LocalAppData appData({
   needsMigration: needsMigration,
 );
 
-Topic custom(String id, {String title = 'custom', String description = ''}) =>
-    Topic(
-      id: id,
-      title: title,
-      categoryId: 'other',
-      description: description,
-      source: TopicSource.userCreated,
-      createdAt: DateTime.utc(2026),
-    );
+Topic custom(
+  String id, {
+  String title = 'custom',
+  String openingQuestion = '',
+  List<String> talkingPoints = const <String>[],
+  String note = '',
+}) => Topic(
+  id: id,
+  title: title,
+  categoryId: 'other',
+  openingQuestion: openingQuestion,
+  talkingPoints: talkingPoints,
+  note: note,
+  source: TopicSource.userCreated,
+  createdAt: DateTime.utc(2026),
+);
+
+Map<String, Object?> v4TopicJson(Topic topic) => <String, Object?>{
+  'id': topic.id,
+  'title': topic.title,
+  'categoryId': topic.categoryId,
+  'description': topic.note,
+  'source': topic.source.name,
+  'createdAt': topic.createdAt?.toIso8601String(),
+};
 
 Future<WadeeController> ready({LocalAppStorage? storage}) async {
   final store = WadeeController(storage: storage);
@@ -100,19 +198,17 @@ Future<void> applyTopicFilters(
   String? category,
   String? sort,
 }) async {
+  if (category != null) {
+    final categoryChip = find.widgetWithText(ChoiceChip, category);
+    await tester.ensureVisible(categoryChip);
+    await tester.tap(categoryChip);
+    await tester.pumpAndSettle();
+  }
+  if (display == null && sort == null) return;
   await tester.tap(find.byTooltip('絞り込みと並び替え'));
   await tester.pumpAndSettle();
   if (display != null) {
     await tester.tap(find.text(display).last);
-    await tester.pump();
-  }
-  if (category != null) {
-    await tester.drag(
-      find.byKey(const Key('topic-filter-sheet-list')),
-      const Offset(0, -360),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text(category).last);
     await tester.pump();
   }
   if (sort != null) {
@@ -136,8 +232,245 @@ Future<void> applyTopicFilters(
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
+  group('person profile', () {
+    test(
+      'profile JSON round trips, trims text, and is saved by the controller',
+      () async {
+        final profile = PersonProfile(
+          relationship: PersonRelationship.friend,
+          closeness: PersonCloseness.casual,
+          ageGroup: PersonAgeGroup.thirties,
+          interests: '  音楽  ',
+          workOrSchool: ' デザイン ',
+          recentEvents: ' 展示会 ',
+          likelyInterests: ' 映画 ',
+          commonTopics: ' ライブ ',
+          topicsToAvoid: ' 政治 ',
+          nextQuestions: ' 次の展示 ',
+        );
+        final person = Person(
+          id: 'profile-person',
+          displayName: 'Profile person',
+          note: '',
+          createdAt: DateTime.utc(2026),
+          profile: profile,
+        );
+
+        final decoded = Person.fromJson(person.toJson());
+        expect(decoded.profile.interests, '音楽');
+        expect(decoded.profile.orderedEntries.first.key, '関係性');
+        expect(decoded.profile.toStructuredMap()['次に聞きたいこと'], '次の展示');
+
+        final storage = MemoryStorage(appData());
+        final store = await ready(storage: storage);
+        final id = await store.addPerson(
+          displayName: ' P ',
+          note: ' note ',
+          profile: profile,
+        );
+        expect(id, isNotNull);
+        expect(store.personById(id!)!.note, 'note');
+        expect(store.personById(id)!.profile.interests, '音楽');
+        expect(storage.data.persons.single.profile.commonTopics, 'ライブ');
+      },
+    );
+
+    test(
+      'v3 people migrate to v4 with an empty profile and retain status',
+      () async {
+        final topic = createStaticTopics().first;
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          LocalAppStorage.snapshotKey: jsonEncode(<String, Object>{
+            'schemaVersion': 3,
+            'customTopics': <Object>[],
+            'favoriteTopicIds': <String>[topic.id],
+            'archivedTopicIds': <String>[],
+            'persons': <Object>[
+              <String, Object>{
+                'id': 'legacy-person',
+                'displayName': 'Legacy',
+                'note': 'memo',
+                'createdAt': DateTime.utc(2026).toIso8601String(),
+              },
+            ],
+            'personTopics': <Object>[
+              <String, Object>{
+                'personId': 'legacy-person',
+                'topicId': topic.id,
+                'note': 'relation memo',
+                'status': 'revisit',
+                'createdAt': DateTime.utc(2026).toIso8601String(),
+              },
+            ],
+          }),
+        });
+
+        final store = await ready();
+        final prefs = await SharedPreferences.getInstance();
+        final snapshot =
+            jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
+                as Map<String, dynamic>;
+        expect(snapshot['schemaVersion'], 6);
+        expect(store.personById('legacy-person')!.profile.isEmpty, isTrue);
+        expect(
+          store.personTopic('legacy-person', topic.id)!.status,
+          PersonTopicStatus.revisit,
+        );
+        expect(store.isFavorite(topic.id), isTrue);
+      },
+    );
+
+    test('v6 snapshot roundtrip preserves every profile field', () async {
+      const profile = PersonProfile(
+        relationship: PersonRelationship.supervisor,
+        closeness: PersonCloseness.close,
+        ageGroup: PersonAgeGroup.fifties,
+        interests: 'ジャズと登山',
+        workOrSchool: 'プロダクトデザイン',
+        recentEvents: '展示会を開催した',
+        likelyInterests: '建築と写真',
+        commonTopics: '週末の散歩',
+        topicsToAvoid: '体調の話',
+        nextQuestions: '次に行く展覧会',
+      );
+      final person = Person(
+        id: 'v4-profile-person',
+        displayName: 'V4 person',
+        note: 'memo',
+        createdAt: DateTime.utc(2026),
+        profile: profile,
+      );
+      final storage = LocalAppStorage();
+
+      await storage.saveSnapshot(
+        customTopics: const <Topic>[],
+        favoriteIds: const <String>[],
+        archivedIds: const <String>[],
+        persons: <Person>[person],
+        personTopics: const <PersonTopic>[],
+      );
+
+      final reloaded = await LocalAppStorage().load();
+      final savedProfile = reloaded.persons.single.profile;
+      expect(savedProfile.relationship, PersonRelationship.supervisor);
+      expect(savedProfile.closeness, PersonCloseness.close);
+      expect(savedProfile.ageGroup, PersonAgeGroup.fifties);
+      expect(savedProfile.interests, 'ジャズと登山');
+      expect(savedProfile.workOrSchool, 'プロダクトデザイン');
+      expect(savedProfile.recentEvents, '展示会を開催した');
+      expect(savedProfile.likelyInterests, '建築と写真');
+      expect(savedProfile.commonTopics, '週末の散歩');
+      expect(savedProfile.topicsToAvoid, '体調の話');
+      expect(savedProfile.nextQuestions, '次に行く展覧会');
+    });
+
+    testWidgets('profile form and detail are usable at 320px with large text', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final store = await ready(storage: MemoryStorage(appData()));
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: PersonFormScreen(store: store),
+        ),
+      );
+      expect(
+        find.text('名前だけで登録できます。プロフィールを追加すると、AIの提案がより相手に合いやすくなります。'),
+        findsOneWidget,
+      );
+      final profileExpansion = find.text('プロフィールを追加（任意）');
+      await tester.drag(find.byType(ListView), const Offset(0, -360));
+      await tester.pumpAndSettle();
+      await tester.tap(profileExpansion);
+      await tester.pumpAndSettle();
+      expect(find.text('基本'), findsOneWidget);
+      expect(find.text('会話のヒント'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      final person = Person(
+        id: 'detail-profile',
+        displayName: '相手',
+        note: '会話の全般メモ',
+        createdAt: DateTime.utc(2026),
+        profile: const PersonProfile(
+          relationship: PersonRelationship.colleague,
+          closeness: PersonCloseness.casual,
+          ageGroup: PersonAgeGroup.thirties,
+          interests: '読書',
+          workOrSchool: '企画部',
+          recentEvents: '引っ越した',
+          likelyInterests: '映画',
+          commonTopics: '散歩',
+          topicsToAvoid: '政治',
+          nextQuestions: '最近読んだ本',
+        ),
+      );
+      final detailStore = await ready(
+        storage: MemoryStorage(appData(persons: <Person>[person])),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: PersonDetailScreen(store: detailStore, personId: person.id),
+        ),
+      );
+      for (final value in <String>[
+        '同僚',
+        '気軽に話せる',
+        '30代',
+        '読書',
+        '企画部',
+        '引っ越した',
+        '映画',
+        '散歩',
+        '政治',
+        '最近読んだ本',
+        '会話の全般メモ',
+      ]) {
+        expect(find.text(value), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('empty profile CTA opens the profile section expanded', (
+      tester,
+    ) async {
+      final person = Person(
+        id: 'empty-profile',
+        displayName: 'Empty profile',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final store = await ready(
+        storage: MemoryStorage(appData(persons: <Person>[person])),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PersonDetailScreen(store: store, personId: person.id),
+        ),
+      );
+
+      await tester.tap(find.text('プロフィールを追加'));
+      await tester.pumpAndSettle();
+      expect(find.text('プロフィールを追加（任意）'), findsOneWidget);
+      expect(find.text('基本'), findsOneWidget);
+    });
+  });
+
   group('migration and validation', () {
-    test('v1 migrates to v3 and preserves favorites', () async {
+    test('v1 migrates to v4 and preserves favorites', () async {
       final builtin = createStaticTopics().first;
       SharedPreferences.setMockInitialValues(<String, Object>{
         LocalAppStorage.snapshotKey: jsonEncode(<String, Object>{
@@ -162,7 +495,7 @@ void main() {
         jsonDecode(
           prefs.getString(LocalAppStorage.snapshotKey)!,
         )['schemaVersion'],
-        3,
+        6,
       );
       expect(store.isFavorite('old'), isTrue);
       expect(store.isFavorite(builtin.id), isTrue);
@@ -232,7 +565,7 @@ void main() {
     });
 
     test(
-      'v2 person-topic data migrates planned status into one v3 snapshot',
+      'v2 person-topic data migrates planned status into one v4 snapshot',
       () async {
         final builtin = createStaticTopics().first;
         final raw = jsonEncode(<String, Object>{
@@ -266,7 +599,7 @@ void main() {
         final snapshot =
             jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
                 as Map<String, dynamic>;
-        expect(snapshot['schemaVersion'], 3);
+        expect(snapshot['schemaVersion'], 6);
         expect(
           (snapshot['personTopics'] as List<dynamic>).single['status'],
           'planned',
@@ -329,8 +662,8 @@ void main() {
         jsonEncode(<String, Object>{
           'schemaVersion': 2,
           'customTopics': <Object>[
-            custom('dup').toJson(),
-            custom('dup').toJson(),
+            v4TopicJson(custom('dup')),
+            v4TopicJson(custom('dup')),
           ],
           'favoriteTopicIds': <String>[],
           'archivedTopicIds': <String>[],
@@ -390,8 +723,8 @@ void main() {
         );
         final store = await ready(storage: storage);
         await Future.wait(<Future<bool>>[
-          store.addTopic(title: 'one', categoryId: 'other', description: ''),
-          store.addTopic(title: 'two', categoryId: 'other', description: ''),
+          store.addTopic(title: 'one', categoryId: 'other'),
+          store.addTopic(title: 'two', categoryId: 'other'),
         ]);
         final builtin = store.topics.first;
         await store.toggleFavorite(builtin.id);
@@ -499,11 +832,220 @@ void main() {
     );
 
     test('Topic JSON is immutable and excludes favorite state', () {
-      final topic = custom('json', description: 'd');
+      final topic = custom('json', note: 'd');
       final restored = Topic.fromJson(topic.toJson());
       expect(restored.source, TopicSource.userCreated);
-      expect(restored.description, 'd');
+      expect(restored.note, 'd');
       expect(topic.toJson().containsKey('isFavorite'), isFalse);
+    });
+
+    test(
+      'v5 topic preserves conversation fields and defensive talking points',
+      () {
+        final sourcePoints = <String>['  きっかけ  ', '次に聞くこと'];
+        final topic = Topic(
+          id: 'conversation',
+          title: '会話',
+          categoryId: 'other',
+          openingQuestion: '最近どうですか？',
+          talkingPoints: sourcePoints,
+          note: 'メモ',
+          source: TopicSource.userCreated,
+        );
+        sourcePoints.add('外部からの変更');
+
+        expect(topic.talkingPoints, <String>['  きっかけ  ', '次に聞くこと']);
+        expect(() => topic.talkingPoints.add('変更'), throwsUnsupportedError);
+        final restored = Topic.fromJson(topic.toJson());
+        expect(restored.openingQuestion, '最近どうですか？');
+        expect(restored.talkingPoints, topic.talkingPoints);
+        expect(restored.note, 'メモ');
+        expect(restored.toJson().containsKey('description'), isFalse);
+      },
+    );
+
+    test(
+      'v4 snapshot migrates all topic, person and relation state to v6',
+      () async {
+        const profile = PersonProfile(
+          relationship: PersonRelationship.family,
+          closeness: PersonCloseness.close,
+          ageGroup: PersonAgeGroup.forties,
+          interests: '読書',
+          workOrSchool: '教育',
+          recentEvents: '引っ越し',
+          likelyInterests: '建築',
+          commonTopics: '散歩',
+          topicsToAvoid: '体調',
+          nextQuestions: '次の休み',
+        );
+        final person = Person(
+          id: 'v4-person',
+          displayName: 'V4 person',
+          note: 'person memo',
+          createdAt: DateTime.utc(2026),
+          profile: profile,
+        );
+        final relation = PersonTopic(
+          personId: person.id,
+          topicId: 'v4-topic',
+          note: 'relation memo',
+          createdAt: DateTime.utc(2026),
+          status: PersonTopicStatus.revisit,
+        );
+        final raw = jsonEncode(<String, Object>{
+          'schemaVersion': 4,
+          'customTopics': <Object>[
+            <String, Object?>{
+              'id': 'v4-topic',
+              'title': '前の話題',
+              'categoryId': 'other',
+              'description': '以前の説明',
+              'source': 'userCreated',
+              'createdAt': DateTime.utc(2026).toIso8601String(),
+            },
+          ],
+          'favoriteTopicIds': <String>['v4-topic'],
+          'archivedTopicIds': <String>['v4-topic'],
+          'persons': <Object>[person.toJson()],
+          'personTopics': <Object>[relation.toJson()],
+        });
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          LocalAppStorage.snapshotKey: raw,
+        });
+
+        final store = await ready();
+        final topic = store.topicByIdIncludingArchived('v4-topic')!;
+        expect(topic.note, '以前の説明');
+        expect(topic.openingQuestion, '「前の話題」について、どう思いますか？');
+        expect(topic.talkingPoints, isEmpty);
+        expect(store.isFavorite(topic.id), isTrue);
+        expect(store.isArchived(topic.id), isTrue);
+        expect(store.personById(person.id)!.profile.toJson(), profile.toJson());
+        expect(store.personById(person.id)!.note, 'person memo');
+        expect(
+          store.personTopic(person.id, topic.id)!.status,
+          PersonTopicStatus.revisit,
+        );
+        expect(store.personTopic(person.id, topic.id)!.note, 'relation memo');
+        final prefs = await SharedPreferences.getInstance();
+        final saved =
+            jsonDecode(prefs.getString(LocalAppStorage.snapshotKey)!)
+                as Map<String, dynamic>;
+        expect(saved['schemaVersion'], 6);
+        final savedTopic = (saved['customTopics'] as List).single as Map;
+        expect(savedTopic['note'], '以前の説明');
+        expect(savedTopic['openingQuestion'], '「前の話題」について、どう思いますか？');
+        expect(savedTopic['talkingPoints'], isEmpty);
+      },
+    );
+
+    test('failed v4 migration save keeps the raw snapshot', () async {
+      final raw = jsonEncode(<String, Object>{
+        'schemaVersion': 4,
+        'customTopics': <Object>[
+          <String, Object?>{
+            'id': 'failed-v4-topic',
+            'title': '失敗する移行',
+            'categoryId': 'other',
+            'description': '残す説明',
+            'source': 'userCreated',
+            'createdAt': DateTime.utc(2026).toIso8601String(),
+          },
+        ],
+        'favoriteTopicIds': <String>[],
+        'archivedTopicIds': <String>[],
+        'persons': <Object>[],
+        'personTopics': <Object>[],
+      });
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        LocalAppStorage.snapshotKey: raw,
+      });
+
+      final store = WadeeController(storage: SaveFailStorage());
+      await store.load();
+      final prefs = await SharedPreferences.getInstance();
+      expect(store.loadState, AppLoadState.error);
+      expect(prefs.getString(LocalAppStorage.snapshotKey), raw);
+    });
+
+    testWidgets(
+      'conversation topic tile is usable at 320px and 200% text scale',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(320, 700));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final topic = Topic(
+          id: 'narrow-conversation',
+          title: '折り返して表示される長めの会話タイトル',
+          categoryId: 'other',
+          openingQuestion: '最近、心に残った出来事について聞かせてもらえますか？',
+          talkingPoints: const <String>['始まったきっかけ', '次にしてみたいこと', '思い出に残った場面'],
+          note: 'メモ',
+          source: TopicSource.userCreated,
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: ListView(
+                children: [
+                  TopicTile(
+                    topic: topic,
+                    categoryName: 'その他',
+                    isFavorite: false,
+                    onTap: () {},
+                    onToggleFavorite: () {},
+                    onEdit: () {},
+                    onArchive: () {},
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        expect(find.text('最初のひとこと'), findsOneWidget);
+        expect(find.text('・始まったきっかけ'), findsOneWidget);
+        expect(find.text('ほか 1件'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    test(
+      'controller trims conversation fields and removes empty talking points',
+      () async {
+        final store = await ready(storage: MemoryStorage(appData()));
+        expect(
+          await store.addTopic(
+            title: '  新しい話題  ',
+            categoryId: ' other ',
+            openingQuestion: '  最初の質問  ',
+            talkingPoints: <String>['  ヒント ', ' ', '\n次のヒント\n'],
+            note: '  メモ  ',
+          ),
+          isTrue,
+        );
+        final topic = store.customTopics.single;
+        expect(topic.title, '新しい話題');
+        expect(topic.categoryId, 'other');
+        expect(topic.openingQuestion, '最初の質問');
+        expect(topic.talkingPoints, <String>['ヒント', '次のヒント']);
+        expect(topic.note, 'メモ');
+      },
+    );
+
+    testWidgets('topic form exposes required field semantics', (tester) async {
+      final store = await ready(storage: MemoryStorage(appData()));
+      await tester.pumpWidget(MaterialApp(home: TopicFormScreen(store: store)));
+
+      expect(find.bySemanticsLabel('タイトル（必須）'), findsOneWidget);
+      expect(find.bySemanticsLabel('最初のひとこと（必須）'), findsOneWidget);
+      expect(find.text('タイトル'), findsNothing);
+      expect(find.text('最初のひとこと'), findsNothing);
     });
 
     test(
@@ -516,7 +1058,7 @@ void main() {
             id: builtin.id,
             title: 'x',
             categoryId: 'other',
-            description: '',
+            note: '',
           ),
           isFalse,
         );
@@ -622,11 +1164,7 @@ void main() {
           appData(favoriteIds: <String>{'custom-1'}),
         );
         final store = await ready(storage: storage);
-        await store.addTopic(
-          title: 'new',
-          categoryId: 'other',
-          description: '',
-        );
+        await store.addTopic(title: 'new', categoryId: 'other', note: '');
         expect(store.customTopics.single.id, isNot('custom-1'));
       },
     );
@@ -735,7 +1273,12 @@ void main() {
           find.byType(TextFormField).at(1),
           'general note',
         );
-        await tester.tap(find.byType(FilledButton));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(PersonFormScreen),
+            matching: find.byType(FilledButton),
+          ),
+        );
         await tester.pumpAndSettle();
         final person = store.persons.single;
         expect(person.note, 'general note');
@@ -788,7 +1331,7 @@ void main() {
       expect(find.byType(NavigationBar), findsOneWidget);
     });
 
-    testWidgets('form creates, v3 saves, edit keeps the topic and reloads', (
+    testWidgets('form creates, v6 saves, edit keeps the topic and reloads', (
       tester,
     ) async {
       final store = await ready();
@@ -802,18 +1345,25 @@ void main() {
       await tester.tap(find.byType(DropdownButtonFormField<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text(categories.first.name).last);
-      await tester.enterText(fields.at(1), 'memo');
-      await tester.tap(find.byType(FilledButton));
+      await tester.enterText(fields.at(1), 'createdについて、どう思いますか？');
+      await tester.enterText(fields.at(2), 'memo');
+      await tester.drag(
+        find.byKey(const Key('topic-form-list')),
+        const Offset(0, -700),
+      );
+      await tester.pumpAndSettle();
+      final save = find.text('話題を保存する');
+      await tester.tap(save);
       await tester.pumpAndSettle();
       final id = store.customTopics.single.id;
-      expect(store.topicById(id)!.description, 'memo');
+      expect(store.topicById(id)!.note, 'memo');
       final restored = await ready();
       expect(restored.topicById(id)!.title, 'created');
       await store.updateTopic(
         id: id,
         title: 'edited',
         categoryId: 'other',
-        description: 'memo',
+        note: 'memo',
       );
       expect(store.customTopics, hasLength(1));
       expect(store.topicById(id)!.title, 'edited');
@@ -834,7 +1384,7 @@ void main() {
       );
       expect(find.byType(Chip), findsOneWidget);
       expect(find.byIcon(Icons.chat_bubble_outline), findsOneWidget);
-      expect(find.text(builtin.description), findsOneWidget);
+      expect(find.text(builtin.openingQuestion), findsOneWidget);
       await tester.tap(find.byType(FilledButton));
       await tester.pump();
       expect(
@@ -848,7 +1398,7 @@ void main() {
         storage: MemoryStorage(
           appData(
             customTopics: <Topic>[
-              custom('memo', title: 'memo title', description: 'memo body'),
+              custom('memo', title: 'memo title', note: 'memo body'),
             ],
           ),
         ),
@@ -877,7 +1427,7 @@ void main() {
           id: 'mine',
           title: 'edited mine',
           categoryId: 'other',
-          description: '',
+          note: '',
         );
         expect(store.customTopics.single.title, 'edited mine');
         expect(store.topicById('mine'), isNotNull);
@@ -937,7 +1487,7 @@ void main() {
 
         final v2 = jsonEncode(<String, Object>{
           'schemaVersion': 2,
-          'customTopics': <Object>[custom('from-v2').toJson()],
+          'customTopics': <Object>[v4TopicJson(custom('from-v2'))],
           'favoriteTopicIds': <String>[],
           'archivedTopicIds': <String>[],
           'persons': <Object>[],
@@ -984,7 +1534,12 @@ void main() {
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextFormField).at(0), 'after');
         await tester.enterText(find.byType(TextFormField).at(1), 'after note');
-        await tester.tap(find.byType(FilledButton));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(PersonFormScreen),
+            matching: find.byType(FilledButton),
+          ),
+        );
         await tester.pumpAndSettle();
         expect(store.personById('p')!.displayName, 'after');
         expect(store.personById('p')!.note, 'after note');
@@ -1000,7 +1555,12 @@ void main() {
         expect(store.personById('p'), isNotNull);
         await tester.tap(find.byIcon(Icons.delete_outline));
         await tester.pumpAndSettle();
-        await tester.tap(find.byType(FilledButton));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.byType(FilledButton),
+          ),
+        );
         await tester.pumpAndSettle();
         expect(store.personById('p'), isNull);
         expect(store.personTopics, isEmpty);
@@ -1040,7 +1600,7 @@ void main() {
         );
         await tester.tap(find.text(topic.title));
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('メモを編集'));
+        await tester.ensureVisible(find.text('メモを編集', skipOffstage: false));
         await tester.pumpAndSettle();
         await tester.tap(find.text('メモを編集'));
         await tester.pumpAndSettle();
@@ -1048,7 +1608,7 @@ void main() {
         await tester.tap(find.byType(TextButton));
         await tester.pumpAndSettle();
         expect(store.personTopic('p', topic.id)!.note, 'old');
-        await tester.ensureVisible(find.text('メモを編集'));
+        await tester.ensureVisible(find.text('メモを編集', skipOffstage: false));
         await tester.pumpAndSettle();
         await tester.tap(find.text('メモを編集'));
         await tester.pumpAndSettle();
@@ -1174,7 +1734,12 @@ void main() {
           find.byType(TextFormField).at(0),
           'edited custom',
         );
-        await tester.tap(find.byType(FilledButton));
+        await tester.drag(
+          find.byKey(const Key('topic-form-list')),
+          const Offset(0, -900),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('保存'));
         await tester.pumpAndSettle();
         expect(store.customTopics, hasLength(1));
         expect(find.text('edited custom'), findsOneWidget);
@@ -1270,6 +1835,245 @@ void main() {
     );
   });
 
+  group('Topic category navigation', () {
+    testWidgets(
+      'shows all category chips and intersects the selected category',
+      (tester) async {
+        final work = custom(
+          'category-work',
+          title: 'Work only',
+        ).copyWith(categoryId: 'work');
+        final beauty = custom(
+          'category-beauty',
+          title: 'Beauty only',
+        ).copyWith(categoryId: 'beauty');
+        final store = await ready(
+          storage: MemoryStorage(appData(customTopics: <Topic>[work, beauty])),
+        );
+        expect(store.topics.map((topic) => topic.title), contains('Work only'));
+        expect(
+          store.topics
+              .firstWhere((topic) => topic.title == 'Work only')
+              .categoryId,
+          'work',
+        );
+        await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+
+        expect(
+          find.byKey(const Key('topic-category-chip-all')),
+          findsOneWidget,
+        );
+        for (final category in categories) {
+          final chip = find.byKey(Key('topic-category-chip-${category.id}'));
+          await tester.ensureVisible(chip);
+          expect(chip, findsOneWidget);
+        }
+        await applyTopicFilters(tester, display: '自作');
+        final workChip = find.byKey(const Key('topic-category-chip-work'));
+        await tester.ensureVisible(workChip);
+        await tester.tap(workChip);
+        await tester.pumpAndSettle();
+        expect(tester.widget<ChoiceChip>(workChip).selected, isTrue);
+        final semanticsHandle = tester.ensureSemantics();
+        expect(
+          tester.getSemantics(workChip),
+          matchesSemantics(
+            label: '仕事',
+            hasSelectedState: true,
+            isSelected: true,
+            isButton: true,
+            hasEnabledState: true,
+            isEnabled: true,
+            isFocusable: true,
+            hasTapAction: true,
+            hasFocusAction: true,
+          ),
+        );
+        semanticsHandle.dispose();
+        expect(find.text('Work only'), findsOneWidget);
+        expect(find.text('Beauty only'), findsNothing);
+        expect(
+          tester
+              .widget<ChoiceChip>(
+                find.byKey(const Key('topic-category-chip-all')),
+              )
+              .selected,
+          isFalse,
+        );
+      },
+    );
+
+    testWidgets(
+      'uses catalog sections for standard order and flat lists otherwise',
+      (tester) async {
+        final work = custom(
+          'section-work',
+          title: 'Zebra work',
+        ).copyWith(categoryId: 'work');
+        final beauty = custom(
+          'section-beauty',
+          title: 'Alpha beauty',
+        ).copyWith(categoryId: 'beauty');
+        final store = await ready(
+          storage: MemoryStorage(appData(customTopics: <Topic>[work, beauty])),
+        );
+        await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+        await applyTopicFilters(tester, display: '自作');
+
+        expect(
+          find.byKey(const Key('topic-category-header-work')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('topic-category-header-beauty')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('topic-category-header-hobby')),
+          findsNothing,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('topic-category-header-work')),
+            matching: find.text('1件'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .getTopLeft(find.byKey(const Key('topic-category-header-work')))
+              .dy,
+          lessThan(
+            tester
+                .getTopLeft(
+                  find.byKey(const Key('topic-category-header-beauty')),
+                )
+                .dy,
+          ),
+        );
+
+        await applyTopicFilters(tester, sort: '名前順');
+        expect(
+          find.byKey(const Key('topic-category-header-work')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('topic-category-header-beauty')),
+          findsNothing,
+        );
+        expect(
+          tester.getTopLeft(find.text('Alpha beauty')).dy,
+          lessThan(tester.getTopLeft(find.text('Zebra work')).dy),
+        );
+
+        final workChip = find.byKey(const Key('topic-category-chip-work'));
+        await tester.ensureVisible(workChip);
+        await tester.tap(workChip);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('topic-category-header-work')),
+          findsOneWidget,
+        );
+        expect(find.text('Zebra work'), findsOneWidget);
+        expect(find.text('Alpha beauty'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'filter sheet has no category controls and category chips stay usable at 320px',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(320, 700));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final store = await ready(storage: MemoryStorage(appData()));
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: TopicsScreen(store: store),
+          ),
+        );
+        final beautyChip = find.byKey(const Key('topic-category-chip-beauty'));
+        await tester.ensureVisible(beautyChip);
+        await tester.tap(beautyChip);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        await tester.tap(find.byTooltip('絞り込みと並び替え'));
+        await tester.pumpAndSettle();
+        expect(find.byType(RadioListTile<String?>), findsNothing);
+        expect(find.text('カテゴリー'), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+    testWidgets('empty state clears only the condition that caused it', (
+      tester,
+    ) async {
+      final work = custom(
+        'empty-work',
+        title: 'Work topic',
+      ).copyWith(categoryId: 'work');
+      final store = await ready(
+        storage: MemoryStorage(appData(customTopics: <Topic>[work])),
+      );
+      await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+      await applyTopicFilters(tester, display: '自作', category: '美容');
+
+      expect(find.text('美容の話題がありません'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'すべて'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, 'すべて'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChoiceChip>(
+              find.byKey(const Key('topic-category-chip-beauty')),
+            )
+            .selected,
+        isFalse,
+      );
+      expect(find.text('Work topic'), findsOneWidget);
+
+      final workChip = find.byKey(const Key('topic-category-chip-work'));
+      await tester.ensureVisible(workChip);
+      await tester.tap(workChip);
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'no such category topic');
+      await tester.pumpAndSettle();
+      expect(find.text('条件に一致する話題がありません'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, '検索をクリア'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, '検索をクリア'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChoiceChip>(
+              find.byKey(const Key('topic-category-chip-beauty')),
+            )
+            .selected,
+        isFalse,
+      );
+      expect(tester.widget<ChoiceChip>(workChip).selected, isTrue);
+      expect(find.text('Work topic'), findsOneWidget);
+    });
+
+    testWidgets('sort alone is not treated as an empty display filter', (
+      tester,
+    ) async {
+      final store = await ready(storage: MemoryStorage(appData()));
+      for (final topic in List<Topic>.from(store.topics)) {
+        await store.archiveTopic(topic.id);
+      }
+      await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+      await applyTopicFilters(tester, sort: '名前順');
+
+      expect(find.text('話題がありません'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'フィルターをクリア'), findsNothing);
+    });
+  });
+
   group('Phase 6 UX', () {
     testWidgets(
       'People searches display names and notes, shows no result, clears, and sorts by name',
@@ -1326,13 +2130,15 @@ void main() {
     );
 
     testWidgets(
-      'Topics searches title description and category, combines filters, sorts, and clears all conditions',
+      'Topics searches title, opening question, hints, note and category',
       (tester) async {
         final alpha = Topic(
           id: 'alpha',
           title: 'Alpha unique',
           categoryId: 'work',
-          description: 'first description',
+          openingQuestion: 'alpha opening match',
+          talkingPoints: const <String>['alpha hint match'],
+          note: 'alpha note match',
           source: TopicSource.userCreated,
           createdAt: DateTime.utc(2026),
         );
@@ -1340,7 +2146,9 @@ void main() {
           id: 'zebra',
           title: 'Zebra unique',
           categoryId: 'work',
-          description: 'description token',
+          openingQuestion: 'zebra opening token',
+          talkingPoints: const <String>['zebra hint token'],
+          note: 'zebra note token',
           source: TopicSource.userCreated,
           createdAt: DateTime.utc(2026),
         );
@@ -1357,9 +2165,21 @@ void main() {
         await tester.enterText(search, 'Alpha unique');
         await tester.pump();
         expect(find.text('Alpha unique').last, findsOneWidget);
-        await tester.enterText(search, 'description token');
+        for (final token in <String>[
+          'opening token',
+          'hint token',
+          'note token',
+        ]) {
+          await tester.enterText(search, token);
+          await tester.pump();
+          expect(find.text('Zebra unique'), findsOneWidget);
+        }
+        await tester.enterText(search, store.categoryName(zebra.categoryId));
         await tester.pump();
-        expect(find.text('Zebra unique'), findsOneWidget);
+        final firstWorkTopic = createStaticTopics().firstWhere(
+          (topic) => topic.categoryId == zebra.categoryId,
+        );
+        expect(find.text(firstWorkTopic.title), findsOneWidget);
         await tester.enterText(search, '仕事');
         await tester.pump();
         expect(find.text('今どんな仕事をしているか'), findsOneWidget);
@@ -1371,6 +2191,12 @@ void main() {
         expect(find.text('Zebra unique'), findsNothing);
 
         await applyTopicFilters(tester, display: 'すべて');
+        final allCategoryChip = find.byKey(
+          const Key('topic-category-chip-all'),
+        );
+        await tester.ensureVisible(allCategoryChip);
+        await tester.tap(allCategoryChip);
+        await tester.pumpAndSettle();
         await tester.enterText(search, 'unique');
         await tester.pump();
         expect(find.text('Alpha unique'), findsOneWidget);
@@ -1378,14 +2204,9 @@ void main() {
         await tester.enterText(search, 'no matching topic');
         await tester.pump();
         expect(find.text('条件に一致する話題がありません'), findsOneWidget);
-        await tester.tap(find.text('フィルターをクリア'));
+        await tester.tap(find.text('検索をクリア'));
         await tester.pumpAndSettle();
-        expect(
-          tester.widget<TextField>(search).controller!.text,
-          'no matching topic',
-        );
-        await tester.tap(find.byTooltip('検索をクリア'));
-        await tester.pumpAndSettle();
+        expect(tester.widget<TextField>(search).controller!.text, isEmpty);
 
         await applyTopicFilters(tester, display: 'アーカイブ');
         expect(find.text('アーカイブした話題がありません'), findsOneWidget);
@@ -1400,7 +2221,9 @@ void main() {
       final topic = custom(
         'pick',
         title: 'picker zebra',
-        description: 'picker description',
+        openingQuestion: 'picker opening',
+        talkingPoints: const <String>['picker hint'],
+        note: 'picker note',
       );
       final alpha = custom('pick-alpha', title: 'picker alpha');
       final person = Person(
@@ -1422,7 +2245,7 @@ void main() {
           home: TopicPickerScreen(store: store, personId: person.id),
         ),
       );
-      await tester.enterText(find.byType(TextField), 'description');
+      await tester.enterText(find.byType(TextField), 'picker opening');
       await tester.pump();
       expect(find.text('picker zebra'), findsOneWidget);
       await tester.enterText(find.byType(TextField), 'picker');
@@ -1611,7 +2434,7 @@ void main() {
         await tester.tap(find.text('残したい話題'));
         await tester.pumpAndSettle();
         expect(find.textContaining('個別のメモ'), findsOneWidget);
-        await tester.tap(find.text('話題ライブラリを開く'));
+        await tester.tap(find.text('話題の詳細を開く'));
         await tester.pumpAndSettle();
         expect(find.text('この話題は通常の一覧から非表示です。お気に入りの変更はできません。'), findsOneWidget);
         expect(find.text('復元する'), findsOneWidget);
@@ -1859,7 +2682,7 @@ void main() {
       await tester.tap(find.text('2件を追加'));
       await tester.pumpAndSettle();
       expect(find.byType(TopicPickerScreen), findsNothing);
-      expect(find.text('相手全般のメモ'), findsOneWidget);
+      expect(find.text('全般メモ'), findsOneWidget);
       expect(find.text(first.title), findsOneWidget);
       expect(find.text(second.title), findsOneWidget);
       expect(storage.saveCalls, 1);
@@ -1877,7 +2700,11 @@ void main() {
           note: '',
           createdAt: DateTime.utc(2026),
         );
-        final topic = custom('narrow-picker', title: 'narrow picker');
+        final topic = custom(
+          'narrow-picker',
+          title: 'narrow picker',
+          openingQuestion: '狭い画面でも折り返して表示される長い会話開始文です。',
+        );
         final store = await ready(
           storage: MemoryStorage(
             appData(customTopics: <Topic>[topic], persons: <Person>[person]),
@@ -1890,6 +2717,7 @@ void main() {
         );
         await tester.enterText(find.byType(TextField), topic.title);
         await tester.pump();
+        expect(find.text(topic.openingQuestion), findsOneWidget);
         await tester.tap(find.text(topic.title).last);
         await tester.pump();
         expect(find.text('1件を追加'), findsOneWidget);
@@ -1994,7 +2822,9 @@ void main() {
       final topic = custom(
         'detail-topic',
         title: 'Detail topic',
-        description: 'Shared description',
+        openingQuestion: 'Shared opening question',
+        talkingPoints: const <String>['Shared hint'],
+        note: 'Shared note',
       );
       final storage = MemoryStorage(
         appData(
@@ -2159,6 +2989,8 @@ void main() {
         await tester.tap(find.text(fixture.topic.title));
         await tester.pumpAndSettle();
         expect(find.byType(PersonTopicDetailScreen), findsOneWidget);
+        await tester.drag(find.byType(ListView), const Offset(0, -500));
+        await tester.pumpAndSettle();
         expect(find.text('Initial relation note'), findsOneWidget);
       },
     );
@@ -2442,7 +3274,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('話した話題はまだありません'), findsOneWidget);
       expect(find.text('話題のステータスを「話した」にすると、ここに表示されます。'), findsOneWidget);
-      expect(find.byType(FilledButton), findsNothing);
+      expect(find.widgetWithText(FilledButton, 'AIで話題を提案'), findsOneWidget);
     });
 
     testWidgets('person detail remains usable at 320px and 200% text scale', (
@@ -2456,7 +3288,16 @@ void main() {
         note: 'A note that can wrap at a large text scale.',
         createdAt: DateTime.utc(2026),
       );
-      final topic = custom('narrow-person-topic', title: 'Narrow topic');
+      final topic = custom(
+        'narrow-person-topic',
+        title: 'Narrow topic',
+        openingQuestion: '大きな文字でも折り返して表示される、少し長い最初のひとことです。',
+        talkingPoints: const <String>[
+          '最初のヒントは長めの文章です。',
+          '次のヒントも表示します。',
+          '三つ目のヒントです。',
+        ],
+      );
       final store = await ready(
         storage: MemoryStorage(
           appData(
@@ -2483,6 +3324,10 @@ void main() {
       );
       await tester.pumpWidget(detailApp(const TextScaler.linear(2)));
       await tester.pumpAndSettle();
+      expect(find.text('大きな文字でも折り返して表示される、少し長い最初のひとことです。'), findsOneWidget);
+      expect(find.text('・最初のヒントは長めの文章です。'), findsOneWidget);
+      expect(find.text('・次のヒントも表示します。'), findsOneWidget);
+      expect(find.text('ほか 1件'), findsOneWidget);
       expect(
         MediaQuery.textScalerOf(tester.element(find.byType(TabBar))),
         const TextScaler.linear(2),
@@ -2508,7 +3353,7 @@ void main() {
           id: 'filter-alpha',
           title: 'Alpha filter',
           categoryId: 'work',
-          description: '',
+          note: '',
           source: TopicSource.userCreated,
           createdAt: DateTime.utc(2026),
         );
@@ -2537,22 +3382,27 @@ void main() {
         await tester.enterText(find.byType(TextField), 'Alpha');
         await applyTopicFilters(tester, display: 'お気に入り', category: '仕事');
         expect(find.byType(Badge), findsOneWidget);
-        expect(find.byType(InputChip), findsNWidgets(2));
+        expect(find.byType(InputChip), findsOneWidget);
         expect(find.text('お気に入り'), findsOneWidget);
-        expect(find.widgetWithText(InputChip, '仕事'), findsOneWidget);
-        expect(find.text('すべて解除'), findsOneWidget);
+        expect(
+          tester
+              .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, '仕事'))
+              .selected,
+          isTrue,
+        );
 
-        final categoryChip = find.widgetWithText(InputChip, '仕事');
-        final chipRect = tester.getRect(categoryChip);
-        await tester.tapAt(Offset(chipRect.right - 12, chipRect.center.dy));
+        final allCategoryChip = find.byKey(
+          const Key('topic-category-chip-all'),
+        );
+        await tester.ensureVisible(allCategoryChip);
+        await tester.tap(allCategoryChip);
         await tester.pump();
-        expect(categoryChip, findsNothing);
         expect(
           tester.widget<TextField>(find.byType(TextField)).controller!.text,
           'Alpha',
         );
         await applyTopicFilters(tester, category: '仕事');
-        await tester.tap(find.text('すべて解除'));
+        await applyTopicFilters(tester, display: 'すべて');
         await tester.pump();
         expect(find.byType(InputChip), findsNothing);
         expect(
@@ -2626,6 +3476,10 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('美容').last);
       await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(TextFormField).at(1),
+        '美容について、どう思いますか？',
+      );
       await tester.tap(find.text('話題を保存する'));
       await tester.pumpAndSettle();
 
@@ -2634,12 +3488,12 @@ void main() {
       expect(reloaded.customTopics.single.categoryId, 'beauty');
     });
 
-    testWidgets('話題検索と検索条件シートで美容カテゴリーに絞り込める', (tester) async {
+    testWidgets('話題検索とカテゴリーチップで美容カテゴリーに絞り込める', (tester) async {
       final beauty = Topic(
         id: 'beauty-topic',
         title: '美容の話題',
         categoryId: 'beauty',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );
@@ -2647,7 +3501,7 @@ void main() {
         id: 'work-topic',
         title: '仕事の話題',
         categoryId: 'work',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );
@@ -2664,20 +3518,9 @@ void main() {
       await tester.tap(find.byTooltip('検索をクリア'));
       await tester.pump();
 
-      await tester.tap(find.byTooltip('絞り込みと並び替え'));
-      await tester.pumpAndSettle();
-      final beautyOption = find.widgetWithText(RadioListTile<String?>, '美容');
-      await tester.ensureVisible(beautyOption);
-      await tester.pumpAndSettle();
-      expect(beautyOption, findsOneWidget);
-      await tester.tap(beautyOption);
-      await tester.pump();
-      await tester.tap(
-        find.descendant(
-          of: find.byType(FilledButton),
-          matching: find.textContaining('件を表示'),
-        ),
-      );
+      final beautyChip = find.widgetWithText(ChoiceChip, '美容');
+      await tester.ensureVisible(beautyChip);
+      await tester.tap(beautyChip);
       await tester.pumpAndSettle();
 
       expect(find.text(beauty.title), findsOneWidget);
@@ -2697,7 +3540,7 @@ void main() {
         id: 'beauty-picker-topic',
         title: '美容の話題',
         categoryId: 'beauty',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );
@@ -2705,7 +3548,7 @@ void main() {
         id: 'other-picker-topic',
         title: 'その他の話題',
         categoryId: 'other',
-        description: '',
+        note: '',
         source: TopicSource.userCreated,
         createdAt: DateTime.utc(2026),
       );
@@ -2730,9 +3573,1761 @@ void main() {
       expect(find.text(beauty.title), findsOneWidget);
       expect(find.text(other.title), findsNothing);
     });
+  });
 
-    test('美容カテゴリーは専用アイコンを返す', () {
-      expect(categoryIcon('beauty'), Icons.face_retouching_natural_outlined);
+  group('Issue 14 person-scoped topics', () {
+    Future<
+      ({MemoryStorage storage, WadeeController store, Person alice, Person bob})
+    >
+    scopeStore() async {
+      final alice = Person(
+        id: 'alice',
+        displayName: 'Alice',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final bob = Person(
+        id: 'bob',
+        displayName: 'Bob',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final storage = MemoryStorage(appData(persons: <Person>[alice, bob]));
+      return (
+        storage: storage,
+        store: await ready(storage: storage),
+        alice: alice,
+        bob: bob,
+      );
+    }
+
+    test(
+      'v5 snapshot migrates topics to global scope and resaves as v6',
+      () async {
+        final topic = custom(
+          'v5-global',
+          title: 'v5 title',
+          openingQuestion: 'v5 opening',
+        );
+        SharedPreferences.setMockInitialValues(<String, Object>{
+          LocalAppStorage.snapshotKey: jsonEncode(<String, Object>{
+            'schemaVersion': 5,
+            'customTopics': <Object>[
+              topic.toJson()
+                ..remove('scope')
+                ..remove('ownerPersonId'),
+            ],
+            'favoriteTopicIds': <String>[topic.id],
+            'archivedTopicIds': <String>[],
+            'persons': <Object>[],
+            'personTopics': <Object>[],
+          }),
+        });
+        final store = await ready();
+        final restored = store.topicByIdIncludingArchived(topic.id)!;
+        expect(restored.scope, TopicScope.global);
+        expect(restored.ownerPersonId, isNull);
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          jsonDecode(
+            prefs.getString(LocalAppStorage.snapshotKey)!,
+          )['schemaVersion'],
+          6,
+        );
+      },
+    );
+
+    test('AI batch is atomic, private, and can be promoted', () async {
+      final fixture = await scopeStore();
+      final ids = await fixture.store.addAiGeneratedTopicsToPerson(
+        fixture.alice.id,
+        <TopicDraft>[
+          TopicDraft(
+            title: '  Private  ',
+            categoryId: 'work',
+            openingQuestion: '  What changed? ',
+            talkingPoints: <String>[' one ', ' ', 'two'],
+          ),
+        ],
+      );
+      expect(ids, hasLength(1));
+      final topic = fixture.store.topicByIdIncludingArchived(ids!.single)!;
+      expect(topic.source, TopicSource.aiGenerated);
+      expect(topic.isCustom, isFalse);
+      expect(topic.scope, TopicScope.person);
+      expect(topic.ownerPersonId, fixture.alice.id);
+      expect(topic.talkingPoints, <String>['one', 'two']);
+      expect(
+        fixture.store.topics.map((item) => item.id),
+        isNot(contains(topic.id)),
+      );
+      expect(fixture.store.customTopics, isNot(contains(topic)));
+      expect(
+        await fixture.store.assignTopicToPerson(
+          personId: fixture.bob.id,
+          topicId: topic.id,
+        ),
+        isFalse,
+      );
+      expect(await fixture.store.toggleFavorite(topic.id), isFalse);
+      expect(await fixture.store.promotePersonTopicToGlobal(topic.id), isTrue);
+      expect(
+        fixture.store.topicByIdIncludingArchived(topic.id)!.scope,
+        TopicScope.global,
+      );
+      expect(fixture.store.topics.map((item) => item.id), contains(topic.id));
+      expect(
+        fixture.store.customTopics.map((item) => item.id),
+        isNot(contains(topic.id)),
+      );
+      expect(
+        await fixture.store.assignTopicToPerson(
+          personId: fixture.bob.id,
+          topicId: topic.id,
+        ),
+        isTrue,
+      );
     });
+
+    test(
+      'AI duplicate batches and promotion duplicates are rejected',
+      () async {
+        final fixture = await scopeStore();
+        expect(
+          await fixture.store.addTopic(
+            title: 'Same  title',
+            categoryId: 'work',
+            openingQuestion: 'Same question',
+          ),
+          isTrue,
+        );
+        expect(
+          await fixture.store
+              .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+                TopicDraft(
+                  title: ' same title ',
+                  categoryId: 'work',
+                  openingQuestion: 'same   question',
+                ),
+              ]),
+          isNull,
+        );
+        final created = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: 'Private',
+                categoryId: 'work',
+                openingQuestion: 'Question',
+              ),
+            ]);
+        expect(created, isNotNull);
+        expect(
+          await fixture.store.addTopic(
+            title: 'private',
+            categoryId: 'work',
+            openingQuestion: 'question',
+          ),
+          isTrue,
+        );
+        expect(
+          await fixture.store.promotePersonTopicToGlobal(created!.single),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'removing or deleting an owner cascades private topic state',
+      () async {
+        final fixture = await scopeStore();
+        final ids = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: 'Private',
+                categoryId: 'work',
+                openingQuestion: 'Question',
+              ),
+            ]);
+        final id = ids!.single;
+        expect(await fixture.store.archiveTopic(id), isTrue);
+        expect(
+          await fixture.store.removeTopicFromPerson(
+            personId: fixture.alice.id,
+            topicId: id,
+          ),
+          isTrue,
+        );
+        expect(fixture.store.topicByIdIncludingArchived(id), isNull);
+        expect(fixture.store.isArchived(id), isFalse);
+
+        final second = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: 'Private 2',
+                categoryId: 'work',
+                openingQuestion: 'Question 2',
+              ),
+            ]);
+        expect(await fixture.store.deletePerson(fixture.alice.id), isTrue);
+        expect(
+          fixture.store.topicByIdIncludingArchived(second!.single),
+          isNull,
+        );
+      },
+    );
+
+    test('AI batch validates atomically and writes exactly once', () async {
+      final fixture = await scopeStore();
+      final ids = await fixture.store
+          .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+            TopicDraft(title: 'One', categoryId: 'work', openingQuestion: 'Q1'),
+            TopicDraft(title: 'Two', categoryId: 'work', openingQuestion: 'Q2'),
+          ]);
+      expect(ids, hasLength(2));
+      expect(ids!.toSet(), hasLength(2));
+      expect(fixture.storage.saveCalls, 1);
+      final relations = fixture.store.personTopicsFor(fixture.alice.id);
+      expect(relations, hasLength(2));
+      expect(
+        relations.every((item) => item.status == PersonTopicStatus.planned),
+        isTrue,
+      );
+
+      final invalidDrafts = <List<TopicDraft>>[
+        <TopicDraft>[
+          TopicDraft(title: '', categoryId: 'work', openingQuestion: 'Q'),
+        ],
+        <TopicDraft>[
+          TopicDraft(title: 'T', categoryId: 'work', openingQuestion: ''),
+        ],
+        <TopicDraft>[
+          TopicDraft(title: 'T', categoryId: 'unknown', openingQuestion: 'Q'),
+        ],
+        <TopicDraft>[
+          TopicDraft(
+            title: ' Same ',
+            categoryId: 'work',
+            openingQuestion: ' Q ',
+          ),
+          TopicDraft(title: 'same', categoryId: 'work', openingQuestion: 'q'),
+        ],
+      ];
+      for (final drafts in invalidDrafts) {
+        final fresh = await scopeStore();
+        expect(
+          await fresh.store.addAiGeneratedTopicsToPerson(
+            fresh.alice.id,
+            drafts,
+          ),
+          isNull,
+        );
+        expect(fresh.storage.saveCalls, 0);
+        expect(fresh.store.personTopics, isEmpty);
+      }
+
+      final failingStorage = MemoryStorage(
+        appData(persons: <Person>[fixture.alice]),
+        failSaves: true,
+      );
+      final failingStore = await ready(storage: failingStorage);
+      expect(
+        await failingStore.addAiGeneratedTopicsToPerson(
+          fixture.alice.id,
+          <TopicDraft>[
+            TopicDraft(title: 'Fail', categoryId: 'work', openingQuestion: 'Q'),
+          ],
+        ),
+        isNull,
+      );
+      expect(failingStorage.saveCalls, 1);
+      expect(failingStore.personTopics, isEmpty);
+      expect(
+        failingStore.allTopicsIncludingArchived.where(
+          (topic) => topic.id.startsWith('ai-'),
+        ),
+        isEmpty,
+      );
+    });
+
+    test(
+      'promotion preserves relation and archive, then survives owner deletion',
+      () async {
+        final fixture = await scopeStore();
+        final id = (await fixture.store.addAiGeneratedTopicsToPerson(
+          fixture.alice.id,
+          <TopicDraft>[
+            TopicDraft(
+              title: 'Promote',
+              categoryId: 'work',
+              openingQuestion: 'Q',
+            ),
+          ],
+        ))!.single;
+        expect(
+          await fixture.store.updatePersonTopicNote(
+            personId: fixture.alice.id,
+            topicId: id,
+            note: 'Keep',
+          ),
+          isTrue,
+        );
+        expect(
+          await fixture.store.updatePersonTopicStatus(
+            personId: fixture.alice.id,
+            topicId: id,
+            status: PersonTopicStatus.revisit,
+          ),
+          isTrue,
+        );
+        expect(await fixture.store.archiveTopic(id), isTrue);
+        expect(await fixture.store.promotePersonTopicToGlobal(id), isTrue);
+        final promoted = fixture.store.topicByIdIncludingArchived(id)!;
+        expect(promoted.scope, TopicScope.global);
+        expect(promoted.ownerPersonId, isNull);
+        expect(promoted.source, TopicSource.aiGenerated);
+        expect(fixture.store.isArchived(id), isTrue);
+        final aliceRelation = fixture.store.personTopic(fixture.alice.id, id)!;
+        expect(aliceRelation.note, 'Keep');
+        expect(aliceRelation.status, PersonTopicStatus.revisit);
+        expect(await fixture.store.restoreTopic(id), isTrue);
+        expect(
+          await fixture.store.assignTopicToPerson(
+            personId: fixture.bob.id,
+            topicId: id,
+          ),
+          isTrue,
+        );
+        expect(await fixture.store.deletePerson(fixture.alice.id), isTrue);
+        expect(fixture.store.topicByIdIncludingArchived(id), isNotNull);
+        expect(fixture.store.personTopic(fixture.alice.id, id), isNull);
+        expect(fixture.store.personTopic(fixture.bob.id, id), isNotNull);
+      },
+    );
+    test(
+      'same normalized person draft is allowed for another owner only',
+      () async {
+        final fixture = await scopeStore();
+        final aliceIds = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+              TopicDraft(
+                title: '  Shared   private ',
+                categoryId: 'work',
+                openingQuestion: ' Same   opening ',
+              ),
+            ]);
+        final bobIds = await fixture.store
+            .addAiGeneratedTopicsToPerson(fixture.bob.id, <TopicDraft>[
+              TopicDraft(
+                title: 'shared private',
+                categoryId: 'work',
+                openingQuestion: 'same opening',
+              ),
+            ]);
+        expect(aliceIds, hasLength(1));
+        expect(bobIds, hasLength(1));
+        expect(aliceIds!.single, isNot(bobIds!.single));
+        expect(fixture.store.personTopicsFor(fixture.alice.id), hasLength(1));
+        expect(fixture.store.personTopicsFor(fixture.bob.id), hasLength(1));
+        expect(
+          await fixture.store
+              .addAiGeneratedTopicsToPerson(fixture.alice.id, <TopicDraft>[
+                TopicDraft(
+                  title: 'shared private',
+                  categoryId: 'work',
+                  openingQuestion: 'same opening',
+                ),
+              ]),
+          isNull,
+        );
+      },
+    );
+
+    testWidgets(
+      'Bob picker hides private AI, shows promoted AI, but not in mine',
+      (tester) async {
+        final fixture = await scopeStore();
+        final privateId = (await fixture.store.addAiGeneratedTopicsToPerson(
+          fixture.alice.id,
+          <TopicDraft>[
+            TopicDraft(
+              title: 'Private AI for Bob',
+              categoryId: 'work',
+              openingQuestion: 'Question',
+            ),
+          ],
+        ))!.single;
+        expect(
+          await fixture.store.addTopic(
+            title: 'Bob manual topic',
+            categoryId: 'work',
+            openingQuestion: 'Manual question',
+          ),
+          isTrue,
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(
+              store: fixture.store,
+              personId: fixture.bob.id,
+            ),
+          ),
+        );
+        await tester.enterText(find.byType(TextField), 'Private AI for Bob');
+        await tester.pumpAndSettle();
+        final privateCard = find.ancestor(
+          of: find.text('Private AI for Bob'),
+          matching: find.byType(Card),
+        );
+        expect(privateCard, findsNothing);
+        expect(
+          await fixture.store.promotePersonTopicToGlobal(privateId),
+          isTrue,
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicPickerScreen(
+              store: fixture.store,
+              personId: fixture.bob.id,
+            ),
+          ),
+        );
+        await tester.enterText(find.byType(TextField), 'Private AI for Bob');
+        await tester.pumpAndSettle();
+        expect(privateCard, findsOneWidget);
+        await tester.tap(find.text('自作').last);
+        await tester.pumpAndSettle();
+        expect(privateCard, findsNothing);
+        await tester.enterText(find.byType(TextField), 'Bob manual topic');
+        await tester.pumpAndSettle();
+        expect(
+          find.ancestor(
+            of: find.text('Bob manual topic'),
+            matching: find.byType(Card),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+  });
+
+  test('美容カテゴリーは専用アイコンを返す', () {
+    expect(categoryIcon('beauty'), Icons.face_retouching_natural_outlined);
+  });
+
+  group('Issue 14 storage validation', () {
+    Map<String, Object?> rawV6({
+      required Map<String, dynamic> topic,
+      List<Map<String, dynamic>> persons = const <Map<String, dynamic>>[],
+      List<Map<String, dynamic>> relations = const <Map<String, dynamic>>[],
+      List<String> favorites = const <String>[],
+    }) => <String, Object?>{
+      'schemaVersion': 6,
+      'customTopics': <Map<String, dynamic>>[topic],
+      'favoriteTopicIds': favorites,
+      'archivedTopicIds': <String>[],
+      'persons': persons,
+      'personTopics': relations,
+    };
+
+    test(
+      'rejects invalid v6 owner and relation combinations without overwrite',
+      () async {
+        final person = Person(
+          id: 'owner',
+          displayName: 'Owner',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final private = Topic(
+          id: 'private',
+          title: 'Private',
+          categoryId: 'work',
+          openingQuestion: 'Question',
+          source: TopicSource.aiGenerated,
+          scope: TopicScope.person,
+          ownerPersonId: person.id,
+        );
+        final relation = PersonTopic(
+          personId: person.id,
+          topicId: private.id,
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final bob = Person(
+          id: 'bob',
+          displayName: 'Bob',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final bobRelation = PersonTopic(
+          personId: bob.id,
+          topicId: private.id,
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final cases = <Map<String, Object?>>[
+          rawV6(
+            topic: <String, dynamic>{
+              ...private.toJson(),
+              'ownerPersonId': 'missing',
+            },
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson()],
+          ),
+          rawV6(
+            topic: <String, dynamic>{
+              ...private.toJson(),
+              'ownerPersonId': null,
+            },
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: <String, dynamic>{...private.toJson(), 'ownerPersonId': ''},
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: <String, dynamic>{...private.toJson(), 'scope': 'global'},
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson(), bob.toJson()],
+            relations: <Map<String, dynamic>>[bobRelation.toJson()],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson(), bob.toJson()],
+            relations: <Map<String, dynamic>>[
+              relation.toJson(),
+              bobRelation.toJson(),
+            ],
+          ),
+          rawV6(
+            topic: private.toJson(),
+            persons: <Map<String, dynamic>>[person.toJson()],
+            relations: <Map<String, dynamic>>[relation.toJson()],
+            favorites: <String>[private.id],
+          ),
+          rawV6(
+            topic: Topic(
+              id: 'builtin-copy',
+              title: 'Bad',
+              categoryId: 'work',
+              openingQuestion: 'Bad?',
+              source: TopicSource.builtIn,
+            ).toJson(),
+          ),
+        ];
+        for (final snapshot in cases) {
+          final raw = jsonEncode(snapshot);
+          SharedPreferences.setMockInitialValues(<String, Object>{
+            LocalAppStorage.snapshotKey: raw,
+          });
+          await expectLater(
+            LocalAppStorage().load(),
+            throwsA(isA<StorageFormatException>()),
+          );
+          final prefs = await SharedPreferences.getInstance();
+          expect(prefs.getString(LocalAppStorage.snapshotKey), raw);
+        }
+      },
+    );
+
+    test('v4 and v5 reject aiGenerated source', () async {
+      final v5 = <String, Object>{
+        'schemaVersion': 5,
+        'customTopics': <Object>[
+          <String, Object?>{
+            'id': 'ai',
+            'title': 'AI',
+            'categoryId': 'work',
+            'openingQuestion': 'Question',
+            'talkingPoints': <String>[],
+            'note': '',
+            'source': 'aiGenerated',
+            'createdAt': null,
+          },
+        ],
+        'favoriteTopicIds': <String>[],
+        'archivedTopicIds': <String>[],
+        'persons': <Object>[],
+        'personTopics': <Object>[],
+      };
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        LocalAppStorage.snapshotKey: jsonEncode(v5),
+      });
+      await expectLater(
+        LocalAppStorage().load(),
+        throwsA(isA<StorageFormatException>()),
+      );
+      final v4 = <String, Object>{
+        ...v5,
+        'schemaVersion': 4,
+        'customTopics': <Object>[
+          <String, Object?>{
+            'id': 'ai',
+            'title': 'AI',
+            'categoryId': 'work',
+            'description': '',
+            'source': 'aiGenerated',
+            'createdAt': null,
+          },
+        ],
+      };
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        LocalAppStorage.snapshotKey: jsonEncode(v4),
+      });
+      await expectLater(
+        LocalAppStorage().load(),
+        throwsA(isA<StorageFormatException>()),
+      );
+    });
+
+    testWidgets(
+      'private AI topic stays out of library and shows scope badges',
+      (tester) async {
+        final owner = Person(
+          id: 'owner',
+          displayName: 'Owner',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final private = Topic(
+          id: 'private-ai',
+          title: 'Private AI',
+          categoryId: 'work',
+          openingQuestion: 'Question',
+          source: TopicSource.aiGenerated,
+          scope: TopicScope.person,
+          ownerPersonId: owner.id,
+        );
+        final store = await ready(
+          storage: MemoryStorage(
+            appData(
+              customTopics: <Topic>[private],
+              persons: <Person>[owner],
+              personTopics: <PersonTopic>[
+                PersonTopic(
+                  personId: owner.id,
+                  topicId: private.id,
+                  note: '',
+                  createdAt: DateTime.utc(2026),
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pumpWidget(MaterialApp(home: TopicsScreen(store: store)));
+        expect(find.text(private.title), findsNothing);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PersonDetailScreen(store: store, personId: owner.id),
+          ),
+        );
+        expect(find.text(private.title), findsOneWidget);
+        expect(find.text('この相手専用'), findsOneWidget);
+        expect(find.text('AI提案'), findsOneWidget);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TopicDetailScreen(store: store, topicId: private.id),
+          ),
+        );
+        expect(find.text('この相手専用'), findsOneWidget);
+        expect(find.text('AI提案'), findsOneWidget);
+        expect(find.byType(FilledButton), findsNothing);
+      },
+    );
+
+    testWidgets('private AI promotion confirmation fits 320px at 200% text', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final alice = Person(
+        id: 'alice-ui',
+        displayName: 'Alice',
+        note: '',
+        createdAt: DateTime.utc(2026),
+      );
+      final storage = MemoryStorage(appData(persons: <Person>[alice]));
+      final store = await ready(storage: storage);
+      final id =
+          (await store.addAiGeneratedTopicsToPerson(alice.id, <TopicDraft>[
+            TopicDraft(
+              title: 'Private AI',
+              categoryId: 'work',
+              openingQuestion: 'Long opening question for a narrow screen.',
+            ),
+          ]))!.single;
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: PersonTopicDetailScreen(
+            store: store,
+            personId: alice.id,
+            topicId: id,
+          ),
+        ),
+      );
+      expect(find.text('この相手専用'), findsOneWidget);
+      expect(find.text('AI提案'), findsOneWidget);
+      expect(find.text('話題の詳細を開く'), findsOneWidget);
+      await tester.drag(find.byType(ListView), const Offset(0, -500));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('共通の話題にする'));
+      await tester.pumpAndSettle();
+      expect(find.text('共通の話題にしますか？'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('キャンセル'));
+      await tester.pumpAndSettle();
+      expect(store.topicByIdIncludingArchived(id)!.scope, TopicScope.person);
+    });
+  });
+
+  group('TopicSeed catalog', () {
+    test('has six stable, complete seeds for every category', () {
+      const categoryIds = <String>[
+        'hobby',
+        'travel',
+        'food',
+        'entertainment',
+        'work',
+        'daily',
+        'sports',
+        'learning',
+        'beauty',
+        'other',
+      ];
+      const expectedIds = <String>{
+        'seed.hobby.recent_hobby',
+        'seed.hobby.start_hobby',
+        'seed.hobby.tools',
+        'seed.hobby.continuation',
+        'seed.hobby.shared_experience',
+        'seed.hobby.improvement',
+        'seed.travel.recent_outing',
+        'seed.travel.wish_destination',
+        'seed.travel.local_food',
+        'seed.travel.accommodation',
+        'seed.travel.transport',
+        'seed.travel.memory_mishap',
+        'seed.food.favorite_food',
+        'seed.food.recent_tasty',
+        'seed.food.cooking',
+        'seed.food.restaurant_choice',
+        'seed.food.seasonal_food',
+        'seed.food.drinks',
+        'seed.entertainment.movies',
+        'seed.entertainment.dramas',
+        'seed.entertainment.music',
+        'seed.entertainment.books_comics',
+        'seed.entertainment.games',
+        'seed.entertainment.live_exhibitions',
+        'seed.work.role',
+        'seed.work.enjoyment',
+        'seed.work.recent_learning',
+        'seed.work.work_style',
+        'seed.work.team',
+        'seed.work.challenge',
+        'seed.daily.days_off',
+        'seed.daily.morning_night',
+        'seed.daily.recent_event',
+        'seed.daily.shopping',
+        'seed.daily.housework',
+        'seed.daily.refresh',
+        'seed.sports.watching',
+        'seed.sports.exercise',
+        'seed.sports.new_challenge',
+        'seed.sports.school_days',
+        'seed.sports.teams_players',
+        'seed.sports.health',
+        'seed.learning.current_study',
+        'seed.learning.want_to_learn',
+        'seed.learning.learning_style',
+        'seed.learning.school_subject',
+        'seed.learning.knowledge_use',
+        'seed.learning.curiosity',
+        'seed.beauty.skin_care',
+        'seed.beauty.hair',
+        'seed.beauty.fashion',
+        'seed.beauty.grooming',
+        'seed.beauty.relaxation',
+        'seed.beauty.new_items',
+        'seed.other.hometown',
+        'seed.other.childhood',
+        'seed.other.future',
+        'seed.other.seasonal_events',
+        'seed.other.what_if',
+        'seed.other.values',
+      };
+      expect(topicSeeds, hasLength(60));
+      expect(topicSeeds.map((seed) => seed.id).toSet(), expectedIds);
+      expect(topicSeeds.map((seed) => seed.theme).toSet(), hasLength(60));
+      for (final categoryId in categoryIds) {
+        final seeds = topicSeedsForCategory(categoryId);
+        expect(seeds, hasLength(6));
+        for (final seed in seeds) {
+          expect(seed.id, startsWith('seed.$categoryId.'));
+          expect(seed.categoryId, categoryId);
+          expect(seed.theme.trim(), isNotEmpty);
+          expect(seed.conversationPatterns, hasLength(greaterThanOrEqualTo(2)));
+          expect(seed.hintCandidates, hasLength(greaterThanOrEqualTo(2)));
+          expect(
+            seed.conversationPatterns.every((value) => value.trim().isNotEmpty),
+            isTrue,
+          );
+          expect(
+            seed.conversationPatterns.every(
+              (value) => !value.contains('{theme}'),
+            ),
+            isTrue,
+          );
+          expect(
+            seed.hintCandidates.every((value) => value.trim().isNotEmpty),
+            isTrue,
+          );
+        }
+      }
+      expect(
+        topicSeeds.map((seed) => seed.hintCandidates.first).toSet(),
+        hasLength(greaterThan(40)),
+      );
+      expect(topicSeedsForCategory('missing'), isEmpty);
+      expect(
+        jsonEncode(topicSeeds.map((seed) => seed.toJson()).toList()),
+        isNotEmpty,
+      );
+    });
+
+    test('is defensively copied and exposes unmodifiable entries', () {
+      final patterns = <String>['one', 'two'];
+      final hints = <String>['hint one', 'hint two'];
+      final seed = TopicSeed(
+        id: 'seed.hobby.copy',
+        categoryId: 'hobby',
+        theme: 'コピー確認',
+        conversationPatterns: patterns,
+        hintCandidates: hints,
+      );
+      patterns.add('changed');
+      hints.clear();
+      expect(seed.conversationPatterns, <String>['one', 'two']);
+      expect(seed.hintCandidates, <String>['hint one', 'hint two']);
+      expect(() => seed.conversationPatterns.add('no'), throwsUnsupportedError);
+      expect(() => seed.hintCandidates.clear(), throwsUnsupportedError);
+    });
+
+    test('does not change the built-in Topic catalog contract', () {
+      expect(createStaticTopics(), hasLength(36));
+      expect(legacyStaticTopicIdToBuiltinId, hasLength(36));
+      expect(
+        createStaticTopics().map((topic) => topic.id),
+        contains('builtin.hobby.recent_interest'),
+      );
+    });
+  });
+
+  group('local AI suggestions', () {
+    test('local AI runtime supports Android arm64 only', () {
+      expect(supportsLocalAIAbi(ffi.Abi.androidArm64), isTrue);
+      expect(supportsLocalAIAbi(ffi.Abi.androidArm), isFalse);
+      expect(supportsLocalAIAbi(ffi.Abi.androidIA32), isFalse);
+      expect(supportsLocalAIAbi(ffi.Abi.androidX64), isFalse);
+      expect(supportsLocalAIAbi(ffi.Abi.androidRiscv64), isFalse);
+    });
+
+    test(
+      'prompt includes structured profile, person history and cross-category seeds',
+      () {
+        final person = Person(
+          id: 'ai-person',
+          displayName: 'AI Person',
+          note: 'general note',
+          createdAt: DateTime.utc(2026),
+          profile: const PersonProfile(topicsToAvoid: 'avoid this'),
+        );
+        final topic = custom('ai-topic', title: 'Existing topic');
+        final prompt = const LocalAIPromptBuilder().build(
+          LocalAIRequest(
+            person: person,
+            topics: <Topic>[topic],
+            personTopics: <PersonTopic>[
+              PersonTopic(
+                personId: person.id,
+                topicId: topic.id,
+                note: 'person note',
+                createdAt: DateTime.utc(2026),
+              ),
+            ],
+          ),
+        );
+        expect(prompt, contains('avoid this'));
+        expect(prompt, contains('person note'));
+        expect(prompt, contains('Existing topic'));
+        expect(prompt, contains('hobby'));
+        expect(prompt, contains('beauty'));
+      },
+    );
+
+    test('strict parser accepts four drafts and rejects malformed output', () {
+      const parser = LocalAISuggestionParser();
+      final valid = jsonEncode(
+        List<Object?>.generate(
+          4,
+          (index) => <String, Object?>{
+            'title': 'Title $index',
+            'categoryId': 'hobby',
+            'openingQuestion': 'Question $index',
+            'talkingPoints': <String>['hint'],
+          },
+        ),
+      );
+      expect(parser.parse(valid), hasLength(4));
+      final base = (jsonDecode(valid) as List).cast<Map<String, dynamic>>();
+      final invalid = <String>[
+        '```json $valid ```',
+        '[]',
+        jsonEncode(base.take(3).toList()),
+        jsonEncode(<Object?>[...base, base.first]),
+        jsonEncode(
+          base
+              .map((item) => <String, dynamic>{...item, 'extra': true})
+              .toList(),
+        ),
+        jsonEncode(
+          base
+              .map(
+                (item) => <String, dynamic>{...item, 'categoryId': 'unknown'},
+              )
+              .toList(),
+        ),
+        jsonEncode(
+          base.map((item) => <String, dynamic>{...item, 'title': ' '}).toList(),
+        ),
+        jsonEncode(
+          base
+              .map((item) => <String, dynamic>{...item, 'openingQuestion': ''})
+              .toList(),
+        ),
+        jsonEncode(
+          base
+              .map(
+                (item) => <String, dynamic>{
+                  ...item,
+                  'talkingPoints': <String>[],
+                },
+              )
+              .toList(),
+        ),
+        jsonEncode(
+          base
+              .map(
+                (item) => <String, dynamic>{
+                  ...item,
+                  'talkingPoints': <Object?>[1],
+                },
+              )
+              .toList(),
+        ),
+        jsonEncode(
+          base.map((item) => <String, dynamic>{...item, 'note': 1}).toList(),
+        ),
+      ];
+      for (final raw in invalid) {
+        expect(() => parser.parse(raw), throwsFormatException);
+      }
+      expect(
+        () => parser.parse(
+          jsonEncode(
+            List<Object?>.filled(4, <String, Object?>{
+              'title': 'same',
+              'categoryId': 'hobby',
+              'openingQuestion': 'same',
+              'talkingPoints': <String>['hint'],
+            }),
+          ),
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test(
+      'service streams loading then generation and parses strict output',
+      () async {
+        final response = jsonEncode(
+          List<Object?>.generate(
+            4,
+            (index) => <String, Object?>{
+              'title': 'Service $index',
+              'categoryId': 'hobby',
+              'openingQuestion': 'Question $index',
+              'talkingPoints': <String>['hint'],
+            },
+          ),
+        );
+        final engine = _FakeLlamaEngine(<LlamaResponse>[
+          LlamaTokenResponse(text: response, index: 0),
+        ]);
+        final service = LlamaLocalAIService(
+          modelPath: 'fake.gguf',
+          engine: engine,
+        );
+        final stages = <LocalAIStage>[];
+        final person = Person(
+          id: 'service',
+          displayName: 'Service',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final result = await service.suggest(
+          LocalAIRequest(
+            person: person,
+            topics: const <Topic>[],
+            personTopics: const <PersonTopic>[],
+          ),
+          onProgress: (progress) => stages.add(progress.stage),
+        );
+        expect(stages, <LocalAIStage>[
+          LocalAIStage.loadingModel,
+          LocalAIStage.generating,
+        ]);
+        expect(result.drafts, hasLength(4));
+        expect(result.diagnostics.elapsed, isA<Duration>());
+        expect(engine.commands, hasLength(3));
+        expect(engine.commands[0], isA<LlamaLoadModelCommand>());
+        final generate = engine.commands[1] as LlamaGenerateMessagesCommand;
+        expect(generate.messages.map((message) => message.role), <String>[
+          'system',
+          'user',
+        ]);
+        expect(generate.maxTokens, 900);
+        expect(generate.temperature, 0.7);
+        expect(engine.commands[2], isA<LlamaDisposeCommand>());
+      },
+    );
+
+    test(
+      'service reports engine and invalid JSON failures while retaining diagnostics on success',
+      () async {
+        final person = Person(
+          id: 'service-failure',
+          displayName: 'Service',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final request = LocalAIRequest(
+          person: person,
+          topics: const <Topic>[],
+          personTopics: const <PersonTopic>[],
+        );
+        final failed = LlamaLocalAIService(
+          modelPath: 'fake.gguf',
+          engine: _FakeLlamaEngine(<LlamaResponse>[
+            const LlamaErrorResponse(message: 'engine failed'),
+          ]),
+        );
+        await expectLater(
+          failed.suggest(request, onProgress: (_) {}),
+          throwsA(isA<StateError>()),
+        );
+        final malformed = LlamaLocalAIService(
+          modelPath: 'fake.gguf',
+          engine: _FakeLlamaEngine(<LlamaResponse>[
+            const LlamaTokenResponse(text: 'not json', index: 0),
+          ]),
+        );
+        await expectLater(
+          malformed.suggest(request, onProgress: (_) {}),
+          throwsFormatException,
+        );
+      },
+    );
+
+    test(
+      'model manager initializes without downloading and validates final files',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-model-test',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        var requests = 0;
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        final bytes = <int>[1, 2, 3, 4];
+        server.listen((request) async {
+          requests++;
+          request.response.add(bytes);
+          await request.response.close();
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.unprepared);
+        expect(requests, 0);
+        expect(await manager.download(), isTrue);
+        expect(manager.status.state, LocalModelState.ready);
+        expect(requests, 1);
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.ready);
+        expect(requests, 1);
+      },
+    );
+
+    test(
+      'model download resumes a partial file only after a valid range',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp('wadai-range');
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        var range = '';
+        server.listen((request) async {
+          range = request.headers.value(HttpHeaders.rangeHeader) ?? '';
+          request.response.statusCode = HttpStatus.partialContent;
+          request.response.headers.set(
+            HttpHeaders.contentRangeHeader,
+            'bytes 2-3/${bytes.length}',
+          );
+          request.response.add(bytes.sublist(2));
+          await request.response.close();
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        await File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+        ).writeAsBytes(bytes.sublist(0, 2));
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        expect(await manager.download(), isTrue);
+        expect(range, 'bytes=2-');
+        expect(await (await manager.modelFile()).readAsBytes(), bytes);
+        expect(manager.status.state, LocalModelState.ready);
+      },
+    );
+
+    test(
+      'model download restarts after an ignored range and recovers after a bad full part',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-restart',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        final ranges = <String?>[];
+        var requestNumber = 0;
+        server.listen((request) async {
+          ranges.add(request.headers.value(HttpHeaders.rangeHeader));
+          requestNumber++;
+          if (requestNumber == 2) {
+            // A full sized but corrupted response must be deleted before retry.
+            request.response.add(<int>[9, 9, 9, 9]);
+          } else {
+            request.response.add(bytes);
+          }
+          await request.response.close();
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final partial = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+        );
+        await partial.writeAsBytes(bytes.sublist(0, 2));
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        // The first 200 response deliberately ignores bytes=2- and replaces it.
+        expect(await manager.download(), isTrue);
+        expect(ranges.single, 'bytes=2-');
+        await (await manager.modelFile()).delete();
+        await partial.writeAsBytes(<int>[9, 9, 9, 9]);
+        expect(await manager.download(), isFalse);
+        expect(partial.existsSync(), isFalse);
+        expect(await manager.download(), isTrue);
+        expect(ranges.last, isNull);
+      },
+    );
+
+    test(
+      'model download preserves incomplete part, rejects bad range, and coalesces callers',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp('wadai-retry');
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(server.close);
+        var requests = 0;
+        server.listen((request) async {
+          requests++;
+          final range = request.headers.value(HttpHeaders.rangeHeader);
+          if (requests == 1) {
+            request.response.statusCode = HttpStatus.partialContent;
+            request.response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bytes 2-2/4',
+            );
+            request.response.add(<int>[3]);
+          } else if (requests == 2) {
+            request.response.statusCode = HttpStatus.partialContent;
+            request.response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bytes 3-3/4',
+            );
+            request.response.add(<int>[4]);
+          } else if (requests == 3) {
+            request.response.statusCode = HttpStatus.partialContent;
+            request.response.headers.set(
+              HttpHeaders.contentRangeHeader,
+              'bad range',
+            );
+            request.response.add(<int>[4]);
+          } else {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            request.response.add(bytes);
+          }
+          await request.response.close();
+          if (requests <= 3) expect(range, isNotNull);
+        });
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse(
+            'http://${server.address.address}:${server.port}/model',
+          ),
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final partial = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+        );
+        await partial.writeAsBytes(<int>[1, 2]);
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        expect(await manager.download(), isFalse);
+        expect(await partial.length(), 3);
+        expect(await manager.download(), isTrue);
+        await (await manager.modelFile()).delete();
+        await partial.writeAsBytes(<int>[1, 2]);
+        expect(await manager.download(), isFalse);
+        expect((await manager.modelFile()).existsSync(), isFalse);
+        final fresh = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await partial.delete();
+        final downloads = await Future.wait<bool>(<Future<bool>>[
+          fresh.download(),
+          fresh.download(),
+        ]);
+        expect(downloads, <bool>[true, true]);
+        expect(requests, 4);
+      },
+    );
+
+    test(
+      'model manager handles unsupported, invalid final files, and directory errors',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final unsupported = LocalModelManager(supported: () => false);
+        await unsupported.initialize();
+        expect(unsupported.status.state, LocalModelState.unsupported);
+        expect(await unsupported.download(), isFalse);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-invalid',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse('http://localhost/model'),
+          sizeBytes: 4,
+          sha256: sha256.convert(<int>[1, 2, 3, 4]).toString(),
+          license: 'test',
+        );
+        final invalid = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}',
+        );
+        await invalid.writeAsBytes(<int>[9]);
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.unprepared);
+        expect(invalid.existsSync(), isFalse);
+        final broken = LocalModelManager(
+          directoryProvider: () =>
+              Future<Directory>.error(StateError('directory')),
+          supported: () => true,
+        );
+        await broken.initialize();
+        expect(broken.status.state, LocalModelState.failed);
+        expect(await broken.download(), isFalse);
+        expect(broken.status.state, LocalModelState.failed);
+      },
+    );
+
+    testWidgets(
+      'AI screen exposes explicit download, unsupported state, retry, and profile guidance',
+      (tester) async {
+        final person = Person(
+          id: 'ai-empty',
+          displayName: 'Empty',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final store = await ready(
+          storage: MemoryStorage(appData(persons: <Person>[person])),
+        );
+        final unsupported = LocalModelManager(supported: () => false);
+        final failing = _FakeLocalAIService(
+          error: StateError('generation failed'),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AiSuggestionScreen(
+              store: store,
+              person: person,
+              modelManager: unsupported,
+              serviceFactory: (_) => failing,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(find.text('この端末ではローカルAIを利用できません。'), findsOneWidget);
+        expect(find.text('モデルをダウンロード'), findsNothing);
+        expect(find.text('プロフィールを追加'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'AI candidates start unselected, save once, and retain selections after a save failure',
+      (tester) async {
+        final manager = _ReadyModelManager();
+        final person = Person(
+          id: 'ui-person',
+          displayName: 'UI person',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final storage = MemoryStorage(
+          appData(persons: <Person>[person]),
+          failSaves: true,
+        );
+        final store = await ready(storage: storage);
+        final service = _FakeLocalAIService(
+          result: LocalAIResult(
+            drafts: List<TopicDraft>.generate(
+              4,
+              (index) => TopicDraft(
+                title: 'UI candidate $index',
+                categoryId: 'hobby',
+                openingQuestion: 'Opening $index',
+                talkingPoints: const <String>['hint'],
+                note: '',
+              ),
+            ),
+            diagnostics: const LocalAIDiagnostics(
+              elapsed: Duration.zero,
+              rssDeltaBytes: 0,
+            ),
+          ),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            initialRoute: '/ai',
+            routes: <String, WidgetBuilder>{
+              '/': (_) => const Scaffold(body: Text('returned')),
+              '/ai': (_) => AiSuggestionScreen(
+                store: store,
+                person: person,
+                modelManager: manager,
+                serviceFactory: (_) => service,
+              ),
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.text('4件の話題を生成'));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（0件）'), findsOneWidget);
+        await tester.tap(find.byType(CheckboxListTile).at(0));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（1件）'), findsOneWidget);
+        await tester.tap(find.byType(CheckboxListTile).at(1));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（2件）'), findsOneWidget);
+        final before = storage.saveCalls;
+        await tester.scrollUntilVisible(find.text('選択した話題を保存（2件）'), 300);
+        await tester.tap(find.text('選択した話題を保存（2件）'));
+        await tester.pump();
+        expect(storage.saveCalls - before, 1);
+        expect(find.text('保存する話題を選択（2件）'), findsOneWidget);
+        expect(find.textContaining('保存できませんでした'), findsOneWidget);
+        storage.failSaves = false;
+        await tester.scrollUntilVisible(find.text('選択した話題を保存（2件）'), 300);
+        await tester.tap(find.text('選択した話題を保存（2件）'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(store.personTopicsFor(person.id), hasLength(2));
+        expect(
+          store
+              .personTopicsFor(person.id)
+              .every((item) => item.status == PersonTopicStatus.planned),
+          isTrue,
+        );
+        expect(
+          store
+              .personTopicsFor(person.id)
+              .every(
+                (item) =>
+                    store.topicByIdIncludingArchived(item.topicId)!.scope ==
+                    TopicScope.person,
+              ),
+          isTrue,
+        );
+        expect(find.text('returned'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'AI generation error retries and its narrow layout stays usable',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(320, 2000));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final manager = _ReadyModelManager();
+        final person = Person(
+          id: 'retry',
+          displayName: 'Retry',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final store = await ready(
+          storage: MemoryStorage(appData(persons: <Person>[person])),
+        );
+        final service = _FakeLocalAIService(
+          error: StateError('generation failed'),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: AiSuggestionScreen(
+              store: store,
+              person: person,
+              modelManager: manager,
+              serviceFactory: (_) => service,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.text('4件の話題を生成'));
+        await tester.pump();
+        expect(find.text('生成をやり直す'), findsOneWidget);
+        service
+          ..error = null
+          ..result = LocalAIResult(
+            drafts: List<TopicDraft>.generate(
+              4,
+              (index) => TopicDraft(
+                title: 'Retry $index',
+                categoryId: 'hobby',
+                openingQuestion: 'Opening $index',
+                talkingPoints: const <String>['hint'],
+                note: '',
+              ),
+            ),
+            diagnostics: const LocalAIDiagnostics(
+              elapsed: Duration.zero,
+              rssDeltaBytes: 0,
+            ),
+          );
+        await tester.tap(find.text('生成をやり直す'));
+        await tester.pump();
+        expect(find.text('保存する話題を選択（0件）'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'AI generation uses the latest profile and private topic history',
+      (tester) async {
+        final person = Person(
+          id: 'latest-ai',
+          displayName: 'Latest',
+          note: '',
+          createdAt: DateTime.utc(2026),
+        );
+        final store = await ready(
+          storage: MemoryStorage(appData(persons: <Person>[person])),
+        );
+        await store.updatePerson(
+          id: person.id,
+          displayName: person.displayName,
+          note: 'updated person note',
+          profile: const PersonProfile(interests: 'updated interest'),
+        );
+        await store.addAiGeneratedTopicsToPerson(person.id, <TopicDraft>[
+          TopicDraft(
+            title: 'Private history',
+            categoryId: 'hobby',
+            openingQuestion: 'How was it?',
+            talkingPoints: <String>['detail'],
+            note: 'topic note',
+          ),
+        ]);
+        final relation = store.personTopicsFor(person.id).single;
+        await store.updatePersonTopicStatus(
+          personId: person.id,
+          topicId: relation.topicId,
+          status: PersonTopicStatus.revisit,
+        );
+        await store.updatePersonTopicNote(
+          personId: person.id,
+          topicId: relation.topicId,
+          note: 'relation note',
+        );
+        final service = _FakeLocalAIService(
+          result: LocalAIResult(
+            drafts: List<TopicDraft>.generate(
+              4,
+              (index) => TopicDraft(
+                title: 'New $index',
+                categoryId: 'hobby',
+                openingQuestion: 'Question $index',
+                talkingPoints: const <String>['hint'],
+                note: '',
+              ),
+            ),
+            diagnostics: const LocalAIDiagnostics(
+              elapsed: Duration.zero,
+              rssDeltaBytes: 0,
+            ),
+          ),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AiSuggestionScreen(
+              store: store,
+              person: person,
+              modelManager: _ReadyModelManager(),
+              serviceFactory: (_) => service,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('プロフィールを追加'), findsNothing);
+        await tester.tap(find.text('4件の話題を生成'));
+        await tester.pump();
+        final request = service.lastRequest!;
+        expect(request.person.profile.interests, 'updated interest');
+        expect(request.person.note, 'updated person note');
+        expect(request.topics.single.title, 'Private history');
+        expect(request.personTopics.single.status, PersonTopicStatus.revisit);
+        expect(request.personTopics.single.note, 'relation note');
+      },
+    );
+
+    test('valid partial and final models promote without network', () async {
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = null);
+      final directory = await Directory.systemTemp.createTemp('wadai-promote');
+      addTearDown(() => directory.delete(recursive: true));
+      final bytes = <int>[1, 2, 3, 4];
+      final spec = ModelSpec(
+        name: 'test',
+        fileName: 'model.gguf',
+        url: Uri.parse('http://127.0.0.1:1/model'),
+        sizeBytes: bytes.length,
+        sha256: sha256.convert(bytes).toString(),
+        license: 'test',
+      );
+      final partial = File(
+        '${directory.path}${Platform.pathSeparator}${spec.fileName}.part',
+      );
+      await partial.writeAsBytes(bytes);
+      final manager = LocalModelManager(
+        spec: spec,
+        directoryProvider: () async => directory,
+        supported: () => true,
+      );
+      expect(await manager.download(), isTrue);
+      expect(manager.status.state, LocalModelState.ready);
+      expect((await manager.modelFile()).existsSync(), isTrue);
+      final finalManager = LocalModelManager(
+        spec: spec,
+        directoryProvider: () async => directory,
+        supported: () => true,
+      );
+      expect(await finalManager.download(), isTrue);
+      expect(finalManager.status.state, LocalModelState.ready);
+    });
+
+    test(
+      'disposing during a slow model download closes the client safely',
+      () async {
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = null);
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-dispose',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        final requested = Completer<void>();
+        server.listen((request) async {
+          requested.complete();
+          await Future<void>.delayed(const Duration(seconds: 5));
+          await request.response.close();
+        });
+        final manager = LocalModelManager(
+          spec: ModelSpec(
+            name: 'test',
+            fileName: 'model.gguf',
+            url: Uri.parse(
+              'http://${server.address.address}:${server.port}/model',
+            ),
+            sizeBytes: 4,
+            sha256: sha256.convert(<int>[1, 2, 3, 4]).toString(),
+            license: 'test',
+          ),
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        var notifications = 0;
+        manager.addListener(() => notifications++);
+        final download = manager.download();
+        await requested.future;
+        manager.dispose();
+        final before = notifications;
+        await server.close(force: true);
+        expect(await download, isFalse);
+        expect(notifications, before);
+      },
+    );
+
+    test(
+      'initialize restores a valid previous model without network',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-previous',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final bytes = <int>[1, 2, 3, 4];
+        final spec = ModelSpec(
+          name: 'test',
+          fileName: 'model.gguf',
+          url: Uri.parse('http://127.0.0.1:1/model'),
+          sizeBytes: 4,
+          sha256: sha256.convert(bytes).toString(),
+          license: 'test',
+        );
+        final previous = File(
+          '${directory.path}${Platform.pathSeparator}${spec.fileName}.previous',
+        );
+        await previous.writeAsBytes(bytes);
+        final manager = LocalModelManager(
+          spec: spec,
+          directoryProvider: () async => directory,
+          supported: () => true,
+        );
+        await manager.initialize();
+        expect(manager.status.state, LocalModelState.ready);
+        expect((await manager.modelFile()).existsSync(), isTrue);
+        expect(previous.existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'disposing while directory lookup is pending does not start HTTP',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'wadai-late-dir',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final gate = Completer<Directory>();
+        var clients = 0;
+        final manager = LocalModelManager(
+          directoryProvider: () => gate.future,
+          clientFactory: () {
+            clients++;
+            return HttpClient();
+          },
+          supported: () => true,
+        );
+        final download = manager.download();
+        manager.dispose();
+        gate.complete(directory);
+        expect(await download, isFalse);
+        expect(clients, 0);
+      },
+    );
   });
 }

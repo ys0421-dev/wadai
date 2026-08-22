@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../models/person_topic.dart';
+import '../../models/topic.dart';
 import '../../state/wadee_controller.dart';
 import '../topics/topic_actions.dart';
 import '../topics/topic_detail_screen.dart';
@@ -55,14 +56,33 @@ class _PersonTopicDetailScreenState extends State<PersonTopicDetailScreen> {
                         widget.store.categoryName(topic.categoryId),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
+                      if (topic.scope == TopicScope.person)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Chip(label: Text('この相手専用')),
+                        ),
+                      if (topic.source == TopicSource.aiGenerated)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Chip(label: Text('AI提案')),
+                        ),
                       if (archived)
                         const Padding(
                           padding: EdgeInsets.only(top: 8),
                           child: Chip(label: Text('アーカイブ済み')),
                         ),
-                      if (topic.description.trim().isNotEmpty) ...[
+                      if (topic.openingQuestion.trim().isNotEmpty) ...[
                         const SizedBox(height: 8),
-                        Text(topic.description),
+                        const Text(
+                          '最初のひとこと',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(topic.openingQuestion),
+                      ],
+                      if (topic.talkingPoints.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        ...topic.talkingPoints.map((point) => Text('・$point')),
                       ],
                       const SizedBox(height: 12),
                       OutlinedButton.icon(
@@ -75,8 +95,16 @@ class _PersonTopicDetailScreenState extends State<PersonTopicDetailScreen> {
                           ),
                         ),
                         icon: const Icon(Icons.open_in_new),
-                        label: const Text('話題ライブラリを開く'),
+                        label: const Text('話題の詳細を開く'),
                       ),
+                      if (topic.scope == TopicScope.person) ...[
+                        const SizedBox(height: 8),
+                        OutlinedButton.icon(
+                          onPressed: () => _promote(topic.id),
+                          icon: const Icon(Icons.public),
+                          label: const Text('共通の話題にする'),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -194,6 +222,36 @@ class _PersonTopicDetailScreenState extends State<PersonTopicDetailScreen> {
           note: note,
         ) &&
         mounted) {
+      showStoreError(context, widget.store);
+    }
+  }
+
+  Future<void> _promote(String topicId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('共通の話題にしますか？'),
+        content: const Text('この話題は、ほかの相手にも追加できるようになります。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('共通にする'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final promoted = await widget.store.promotePersonTopicToGlobal(topicId);
+    if (!mounted) return;
+    if (promoted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('共通の話題にしました')));
+    } else {
       showStoreError(context, widget.store);
     }
   }

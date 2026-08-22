@@ -47,7 +47,7 @@ class LocalAppStorage {
   static const snapshotKey = 'wadee_app_data';
   static const customTopicsKey = 'custom_topics';
   static const favoriteIdsKey = 'favorite_topic_ids';
-  static const schemaVersion = 3;
+  static const schemaVersion = 6;
 
   Future<LocalAppData> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -123,7 +123,10 @@ class LocalAppStorage {
       if (version is! int) {
         throw const StorageFormatException('Invalid version');
       }
-      if (version == schemaVersion) return _parseV3(map);
+      if (version == schemaVersion) return _parseV6(map);
+      if (version == 5) return _parseV5(map);
+      if (version == 4) return _parseV4(map);
+      if (version == 3) return _parseV3(map);
       if (version == 2) return _parseV2(map);
       if (version == 1) return _parseV1(map);
       throw const StorageFormatException('Unsupported version');
@@ -134,7 +137,7 @@ class LocalAppStorage {
     }
   }
 
-  LocalAppData _parseV3(Map<String, dynamic> map) {
+  LocalAppData _parseV6(Map<String, dynamic> map) {
     final data = LocalAppData(
       customTopics: _parseCurrentTopics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
@@ -147,12 +150,54 @@ class LocalAppStorage {
     return data;
   }
 
-  LocalAppData _parseV2(Map<String, dynamic> map) {
+  LocalAppData _parseV5(Map<String, dynamic> map) {
     final data = LocalAppData(
-      customTopics: _parseCurrentTopics(map['customTopics']),
+      customTopics: _parseV5Topics(map['customTopics']),
       favoriteIds: _parseIds(map['favoriteTopicIds']),
       archivedIds: _parseIds(map['archivedTopicIds']),
       persons: _parsePersons(map['persons']),
+      personTopics: _parsePersonTopics(map['personTopics']),
+      needsMigration: true,
+    );
+    _validate(data);
+    return data;
+  }
+
+  /// v4 already has PersonProfile, but its topics use description instead of
+  /// an opening question, talking points and note.
+  LocalAppData _parseV4(Map<String, dynamic> map) {
+    final data = LocalAppData(
+      customTopics: _parseV4Topics(map['customTopics']),
+      favoriteIds: _parseIds(map['favoriteTopicIds']),
+      archivedIds: _parseIds(map['archivedTopicIds']),
+      persons: _parsePersons(map['persons']),
+      personTopics: _parsePersonTopics(map['personTopics']),
+      needsMigration: true,
+    );
+    _validate(data);
+    return data;
+  }
+
+  /// v3 has the current topic relation status but people have no profile.
+  LocalAppData _parseV3(Map<String, dynamic> map) {
+    final data = LocalAppData(
+      customTopics: _parseV4Topics(map['customTopics']),
+      favoriteIds: _parseIds(map['favoriteTopicIds']),
+      archivedIds: _parseIds(map['archivedTopicIds']),
+      persons: _parseLegacyPersons(map['persons']),
+      personTopics: _parsePersonTopics(map['personTopics']),
+      needsMigration: true,
+    );
+    _validate(data);
+    return data;
+  }
+
+  LocalAppData _parseV2(Map<String, dynamic> map) {
+    final data = LocalAppData(
+      customTopics: _parseV4Topics(map['customTopics']),
+      favoriteIds: _parseIds(map['favoriteTopicIds']),
+      archivedIds: _parseIds(map['archivedTopicIds']),
+      persons: _parseLegacyPersons(map['persons']),
       personTopics: _parseV2PersonTopics(map['personTopics']),
       needsMigration: true,
     );
@@ -179,6 +224,12 @@ class LocalAppStorage {
     'Invalid custom topics',
   );
 
+  List<Topic> _parseV5Topics(Object? value) =>
+      _parseList<Topic>(value, Topic.fromV5Json, 'Invalid v5 custom topics');
+
+  List<Topic> _parseV4Topics(Object? value) =>
+      _parseList<Topic>(value, Topic.fromV4Json, 'Invalid custom topics');
+
   List<Topic> _parseLegacyTopics(Object? value) => _parseList<Topic>(
     value,
     (item) => Topic.fromLegacyJson(item),
@@ -187,6 +238,9 @@ class LocalAppStorage {
 
   List<Person> _parsePersons(Object? value) =>
       _parseList<Person>(value, Person.fromJson, 'Invalid persons');
+
+  List<Person> _parseLegacyPersons(Object? value) =>
+      _parseList<Person>(value, Person.fromLegacyJson, 'Invalid persons');
 
   List<PersonTopic> _parsePersonTopics(Object? value) =>
       _parseList<PersonTopic>(
@@ -251,8 +305,10 @@ class LocalAppStorage {
     final builtinIds = createStaticTopics().map((topic) => topic.id).toSet();
     final customIds = <String>{};
     for (final topic in data.customTopics) {
-      if (topic.source != TopicSource.userCreated ||
+      if (topic.source == TopicSource.builtIn ||
           topic.id.isEmpty ||
+          topic.title.trim().isEmpty ||
+          topic.openingQuestion.trim().isEmpty ||
           !customIds.add(topic.id) ||
           builtinIds.contains(topic.id)) {
         throw const StorageFormatException('Invalid custom topics');
@@ -267,12 +323,39 @@ class LocalAppStorage {
       }
     }
     final knownTopics = <String>{...builtinIds, ...customIds};
+    final personTopicsByTopic = <String, Set<String>>{};
     final pairs = <String>{};
     for (final personTopic in data.personTopics) {
       if (!personIds.contains(personTopic.personId) ||
           !knownTopics.contains(personTopic.topicId) ||
           !pairs.add(personTopic.pairKey)) {
         throw const StorageFormatException('Invalid person topics');
+      }
+      personTopicsByTopic
+          .putIfAbsent(personTopic.topicId, () => <String>{})
+          .add(personTopic.personId);
+    }
+    for (final topic in data.customTopics) {
+      if ((topic.scope == TopicScope.global && topic.ownerPersonId != null) ||
+          (topic.scope == TopicScope.person &&
+              (!personIds.contains(topic.ownerPersonId) ||
+                  personTopicsByTopic[topic.id]?.length != 1 ||
+                  !personTopicsByTopic[topic.id]!.contains(
+                    topic.ownerPersonId,
+                  )))) {
+        throw const StorageFormatException('Invalid topic scope');
+      }
+    }
+    for (final id in data.favoriteIds) {
+      Topic? topic;
+      for (final candidate in data.customTopics) {
+        if (candidate.id == id) {
+          topic = candidate;
+          break;
+        }
+      }
+      if (topic != null && topic.scope == TopicScope.person) {
+        throw const StorageFormatException('Person topic cannot be favorite');
       }
     }
   }

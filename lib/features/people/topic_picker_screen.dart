@@ -263,7 +263,7 @@ class _TopicPickerScreenState extends State<TopicPickerScreen> {
     final query = _search.text.trim().toLowerCase();
     final topics = source.where((topic) {
       final haystack =
-          '${topic.title} ${topic.description} ${widget.store.categoryName(topic.categoryId)}'
+          '${topic.title} ${topic.openingQuestion} ${topic.talkingPoints.join(' ')} ${topic.note} ${widget.store.categoryName(topic.categoryId)}'
               .toLowerCase();
       final matchesFilter = switch (_filter) {
         _PickerFilter.all => true,
@@ -375,12 +375,10 @@ class _TopicSelectionTile extends StatelessWidget {
                           ),
                         ],
                       ),
-                      if (topic.description.trim().isNotEmpty) ...[
+                      if (topic.openingQuestion.trim().isNotEmpty) ...[
                         const SizedBox(height: 4),
                         Text(
-                          topic.description,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                          topic.openingQuestion,
                           style: Theme.of(context).textTheme.bodySmall
                               ?.copyWith(color: appSecondaryTextColor),
                         ),

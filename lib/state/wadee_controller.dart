@@ -8,6 +8,7 @@ import '../models/category.dart';
 import '../models/person.dart';
 import '../models/person_topic.dart';
 import '../models/topic.dart';
+import '../models/topic_draft.dart';
 
 enum AppLoadState { initial, loading, ready, error }
 
@@ -26,9 +27,14 @@ class WadeeController extends ChangeNotifier {
   String? lastError;
 
   List<Topic> get topics => List.unmodifiable(
-    _allTopics.where((topic) => !_archivedIds.contains(topic.id)),
+    _allTopics.where(
+      (topic) =>
+          topic.scope == TopicScope.global && !_archivedIds.contains(topic.id),
+    ),
   );
-  List<Topic> get allTopicsIncludingArchived => List.unmodifiable(_allTopics);
+  List<Topic> get allTopicsIncludingArchived => List.unmodifiable(
+    _allTopics.where((topic) => topic.scope == TopicScope.global),
+  );
   List<Topic> get customTopics => List.unmodifiable(
     topics.where((topic) => topic.source == TopicSource.userCreated),
   );
@@ -97,7 +103,12 @@ class WadeeController extends ChangeNotifier {
   }
 
   Future<bool> toggleFavorite(String id) => _enqueueMutation((state) {
-    if (!state.hasActiveTopic(id)) return null;
+    final topic = state.topicById(id);
+    if (topic == null ||
+        state.archivedIds.contains(id) ||
+        topic.scope != TopicScope.global) {
+      return null;
+    }
     final candidate = state.copy();
     if (!candidate.favoriteIds.add(id)) candidate.favoriteIds.remove(id);
     return candidate;
@@ -106,16 +117,33 @@ class WadeeController extends ChangeNotifier {
   Future<bool> addTopic({
     required String title,
     required String categoryId,
-    required String description,
+    String? openingQuestion,
+    Iterable<String> talkingPoints = const <String>[],
+    String note = '',
   }) => _enqueueMutation((state) {
+    final trimmedTitle = title.trim();
+    final trimmedQuestion =
+        (openingQuestion ?? Topic.fallbackOpeningQuestion(trimmedTitle)).trim();
+    if (trimmedTitle.isEmpty ||
+        trimmedQuestion.isEmpty ||
+        !_isKnownCategory(categoryId) ||
+        _hasDuplicate(
+          state,
+          title: trimmedTitle,
+          openingQuestion: trimmedQuestion,
+        )) {
+      return null;
+    }
     final candidate = state.copy();
     final now = DateTime.now();
     candidate.allTopics.add(
       Topic(
         id: _nextId('custom', candidate, now),
-        title: title,
-        categoryId: categoryId,
-        description: description,
+        title: trimmedTitle,
+        categoryId: categoryId.trim(),
+        openingQuestion: trimmedQuestion,
+        talkingPoints: _normalizedTalkingPoints(talkingPoints),
+        note: note.trim(),
         source: TopicSource.userCreated,
         createdAt: now,
       ),
@@ -127,7 +155,9 @@ class WadeeController extends ChangeNotifier {
     required String id,
     required String title,
     required String categoryId,
-    required String description,
+    String? openingQuestion,
+    Iterable<String> talkingPoints = const <String>[],
+    String note = '',
   }) => _enqueueMutation((state) {
     final index = state.allTopics.indexWhere((topic) => topic.id == id);
     if (index == -1 ||
@@ -135,14 +165,75 @@ class WadeeController extends ChangeNotifier {
         state.allTopics[index].source != TopicSource.userCreated) {
       return null;
     }
+    final trimmedTitle = title.trim();
+    final trimmedQuestion =
+        (openingQuestion ?? Topic.fallbackOpeningQuestion(trimmedTitle)).trim();
+    if (trimmedTitle.isEmpty ||
+        trimmedQuestion.isEmpty ||
+        !_isKnownCategory(categoryId) ||
+        _hasDuplicate(
+          state,
+          title: trimmedTitle,
+          openingQuestion: trimmedQuestion,
+          excludingId: id,
+          ownerPersonId: state.allTopics[index].ownerPersonId,
+        )) {
+      return null;
+    }
     final candidate = state.copy();
     candidate.allTopics[index] = candidate.allTopics[index].copyWith(
-      title: title,
-      categoryId: categoryId,
-      description: description,
+      title: trimmedTitle,
+      categoryId: categoryId.trim(),
+      openingQuestion: trimmedQuestion,
+      talkingPoints: _normalizedTalkingPoints(talkingPoints),
+      note: note.trim(),
     );
     return candidate;
   });
+
+  static List<String> _normalizedTalkingPoints(Iterable<String> values) =>
+      values
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toList(growable: false);
+
+  static String _duplicateKey(String title, String openingQuestion) =>
+      '${title.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase()}\u0000'
+      '${openingQuestion.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase()}';
+
+  static bool _isKnownCategory(String value) =>
+      categories.any((category) => category.id == value.trim());
+
+  static bool _hasDuplicate(
+    _AppState state, {
+    required String title,
+    required String openingQuestion,
+    String? excludingId,
+    String? ownerPersonId,
+  }) {
+    final key = _duplicateKey(title, openingQuestion);
+    return state.allTopics.any(
+      (topic) =>
+          topic.id != excludingId &&
+          (topic.scope == TopicScope.global ||
+              (ownerPersonId != null &&
+                  topic.ownerPersonId == ownerPersonId)) &&
+          _duplicateKey(topic.title, topic.openingQuestion) == key,
+    );
+  }
+
+  bool hasDuplicateTopicForPerson({
+    required String personId,
+    required String title,
+    required String openingQuestion,
+    String? excludingId,
+  }) => _hasDuplicate(
+    _currentState(),
+    title: title,
+    openingQuestion: openingQuestion,
+    excludingId: excludingId,
+    ownerPersonId: personId,
+  );
 
   Future<bool> archiveTopic(String id) => _enqueueMutation((state) {
     if (!state.hasTopic(id) || state.archivedIds.contains(id)) return null;
@@ -156,7 +247,11 @@ class WadeeController extends ChangeNotifier {
     return candidate;
   });
 
-  Future<String?> addPerson({required String displayName, String note = ''}) {
+  Future<String?> addPerson({
+    required String displayName,
+    String note = '',
+    PersonProfile profile = const PersonProfile(),
+  }) {
     final trimmed = displayName.trim();
     if (trimmed.isEmpty || loadState != AppLoadState.ready) {
       return Future<String?>.value(null);
@@ -166,7 +261,13 @@ class WadeeController extends ChangeNotifier {
       final now = DateTime.now();
       final id = _nextId('person', candidate, now);
       candidate.persons.add(
-        Person(id: id, displayName: trimmed, note: note, createdAt: now),
+        Person(
+          id: id,
+          displayName: trimmed,
+          note: note.trim(),
+          createdAt: now,
+          profile: profile.normalized(),
+        ),
       );
       return _ValueCandidate<String>(candidate, id);
     });
@@ -176,6 +277,7 @@ class WadeeController extends ChangeNotifier {
     required String id,
     required String displayName,
     required String note,
+    PersonProfile? profile,
   }) {
     final trimmed = displayName.trim();
     if (trimmed.isEmpty) return Future<bool>.value(false);
@@ -185,7 +287,8 @@ class WadeeController extends ChangeNotifier {
       final candidate = state.copy();
       candidate.persons[index] = candidate.persons[index].copyWith(
         displayName: trimmed,
-        note: note,
+        note: note.trim(),
+        profile: (profile ?? state.persons[index].profile).normalized(),
       );
       return candidate;
     });
@@ -193,9 +296,19 @@ class WadeeController extends ChangeNotifier {
 
   Future<bool> deletePerson(String id) => _enqueueMutation((state) {
     if (!state.persons.any((person) => person.id == id)) return null;
-    final candidate = state.copy()
+    final candidate = state.copy();
+    final ownedIds = candidate.allTopics
+        .where((topic) => topic.ownerPersonId == id)
+        .map((topic) => topic.id)
+        .toSet();
+    candidate
       ..persons.removeWhere((person) => person.id == id)
-      ..personTopics.removeWhere((item) => item.personId == id);
+      ..allTopics.removeWhere((topic) => ownedIds.contains(topic.id))
+      ..personTopics.removeWhere(
+        (item) => item.personId == id || ownedIds.contains(item.topicId),
+      )
+      ..favoriteIds.removeWhere(ownedIds.contains)
+      ..archivedIds.removeWhere(ownedIds.contains);
     return candidate;
   });
 
@@ -204,8 +317,11 @@ class WadeeController extends ChangeNotifier {
     required String topicId,
     String note = '',
   }) => _enqueueMutation((state) {
+    final topic = state.topicById(topicId);
     if (!state.hasPerson(personId) ||
-        !state.hasActiveTopic(topicId) ||
+        topic == null ||
+        state.archivedIds.contains(topicId) ||
+        (topic.scope == TopicScope.person && topic.ownerPersonId != personId) ||
         state.personTopics.any(
           (item) => item.personId == personId && item.topicId == topicId,
         )) {
@@ -239,9 +355,13 @@ class WadeeController extends ChangeNotifier {
         .where((item) => item.personId == personId)
         .map((item) => item.topicId)
         .toSet();
-    if (ids.any(
-      (id) => !state.hasActiveTopic(id) || assignedIds.contains(id),
-    )) {
+    if (ids.any((id) {
+      final topic = state.topicById(id);
+      return topic == null ||
+          state.archivedIds.contains(id) ||
+          assignedIds.contains(id) ||
+          (topic.scope == TopicScope.person && topic.ownerPersonId != personId);
+    })) {
       return null;
     }
 
@@ -300,7 +420,107 @@ class WadeeController extends ChangeNotifier {
       (item) => item.personId == personId && item.topicId == topicId,
     );
     if (index == -1) return null;
-    final candidate = state.copy()..personTopics.removeAt(index);
+    final candidate = state.copy();
+    final topic = candidate.topicById(topicId);
+    if (topic?.scope == TopicScope.person) {
+      candidate
+        ..allTopics.removeWhere((item) => item.id == topicId)
+        ..personTopics.removeWhere((item) => item.topicId == topicId)
+        ..favoriteIds.remove(topicId)
+        ..archivedIds.remove(topicId);
+    } else {
+      candidate.personTopics.removeAt(index);
+    }
+    return candidate;
+  });
+
+  Future<List<String>?> addAiGeneratedTopicsToPerson(
+    String personId,
+    Iterable<TopicDraft> drafts,
+  ) => _enqueueValueMutation<List<String>>((state) {
+    final values = drafts.toList(growable: false);
+    if (!state.hasPerson(personId) || values.isEmpty) return null;
+    final normalized = <TopicDraft>[];
+    final keys = <String>{};
+    for (final draft in values) {
+      final title = draft.title.trim();
+      final openingQuestion = draft.openingQuestion.trim();
+      if (title.isEmpty ||
+          openingQuestion.isEmpty ||
+          !_isKnownCategory(draft.categoryId) ||
+          _hasDuplicate(
+            state,
+            title: title,
+            openingQuestion: openingQuestion,
+            ownerPersonId: personId,
+          ) ||
+          !keys.add(_duplicateKey(title, openingQuestion))) {
+        return null;
+      }
+      normalized.add(
+        TopicDraft(
+          title: title,
+          categoryId: draft.categoryId.trim(),
+          openingQuestion: openingQuestion,
+          talkingPoints: _normalizedTalkingPoints(draft.talkingPoints),
+          note: draft.note.trim(),
+        ),
+      );
+    }
+    final candidate = state.copy();
+    final now = DateTime.now();
+    final ids = <String>[];
+    for (final draft in normalized) {
+      final id = _nextId('ai', candidate, now);
+      ids.add(id);
+      candidate.allTopics.add(
+        Topic(
+          id: id,
+          title: draft.title,
+          categoryId: draft.categoryId,
+          openingQuestion: draft.openingQuestion,
+          talkingPoints: draft.talkingPoints,
+          note: draft.note,
+          source: TopicSource.aiGenerated,
+          scope: TopicScope.person,
+          ownerPersonId: personId,
+          createdAt: now,
+        ),
+      );
+      candidate.personTopics.add(
+        PersonTopic(personId: personId, topicId: id, note: '', createdAt: now),
+      );
+    }
+    return _ValueCandidate<List<String>>(candidate, List.unmodifiable(ids));
+  });
+
+  Future<bool> promotePersonTopicToGlobal(String topicId) => _enqueueMutation((
+    state,
+  ) {
+    final index = state.allTopics.indexWhere((topic) => topic.id == topicId);
+    if (index == -1 || state.allTopics[index].scope != TopicScope.person) {
+      return null;
+    }
+    final topic = state.allTopics[index];
+    if (_hasDuplicate(
+      state,
+      title: topic.title,
+      openingQuestion: topic.openingQuestion,
+      excludingId: topicId,
+    )) {
+      return null;
+    }
+    final candidate = state.copy();
+    candidate.allTopics[index] = Topic(
+      id: topic.id,
+      title: topic.title,
+      categoryId: topic.categoryId,
+      openingQuestion: topic.openingQuestion,
+      talkingPoints: topic.talkingPoints,
+      note: topic.note,
+      source: topic.source,
+      createdAt: topic.createdAt,
+    );
     return candidate;
   });
 
@@ -428,7 +648,7 @@ class _AppState {
 
   LocalAppData toData() => LocalAppData(
     customTopics: allTopics
-        .where((topic) => topic.source == TopicSource.userCreated)
+        .where((topic) => topic.source != TopicSource.builtIn)
         .toList(growable: false),
     favoriteIds: favoriteIds,
     archivedIds: archivedIds,
@@ -438,6 +658,13 @@ class _AppState {
   );
 
   bool hasTopic(String id) => allTopics.any((topic) => topic.id == id);
+  Topic? topicById(String id) {
+    for (final topic in allTopics) {
+      if (topic.id == id) return topic;
+    }
+    return null;
+  }
+
   bool hasActiveTopic(String id) => hasTopic(id) && !archivedIds.contains(id);
   bool hasPerson(String id) => persons.any((person) => person.id == id);
 }

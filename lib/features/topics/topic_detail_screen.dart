@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../app/app_theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../state/wadee_controller.dart';
+import '../../models/topic.dart';
 import 'category_icon.dart';
 import 'topic_actions.dart';
 import 'topic_form_screen.dart';
@@ -34,9 +35,6 @@ class TopicDetailScreen extends StatelessWidget {
       }
       final favorite = store.isFavorite(topic.id);
       final archived = store.isArchived(topic.id);
-      final prompt = topic.isCustom
-          ? '「${topic.title}」について話してみましょう。'
-          : topic.description;
       return Scaffold(
         appBar: AppBar(
           title: const Text('話題の詳細'),
@@ -82,6 +80,20 @@ class TopicDetailScreen extends StatelessWidget {
                   color: appTextColor,
                 ),
               ),
+              if (topic.scope == TopicScope.person ||
+                  topic.source == TopicSource.aiGenerated) ...[
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    if (topic.scope == TopicScope.person)
+                      const Chip(label: Text('この相手専用')),
+                    if (topic.source == TopicSource.aiGenerated)
+                      const Chip(label: Text('AI提案')),
+                  ],
+                ),
+              ],
               if (archived) ...[
                 const SizedBox(height: 10),
                 const Chip(label: Text('アーカイブ済み')),
@@ -127,14 +139,16 @@ class TopicDetailScreen extends StatelessWidget {
                         Icon(Icons.chat_bubble_outline, size: 19),
                         SizedBox(width: 8),
                         Text(
-                          '会話のきっかけ',
+                          '最初のひとこと',
                           style: TextStyle(fontWeight: FontWeight.w800),
                         ),
                       ],
                     ),
                     const SizedBox(height: 16),
                     Text(
-                      prompt,
+                      topic.openingQuestion.trim().isEmpty
+                          ? '最初のひとことは未設定です。'
+                          : topic.openingQuestion,
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w800,
                         height: 1.55,
@@ -144,7 +158,27 @@ class TopicDetailScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              if (topic.isCustom && topic.description.trim().isNotEmpty) ...[
+              if (topic.talkingPoints.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                const Text(
+                  '話を広げるヒント',
+                  style: TextStyle(
+                    color: appSecondaryTextColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ...topic.talkingPoints.map(
+                  (point) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      '・$point',
+                      style: const TextStyle(height: 1.65, fontSize: 16),
+                    ),
+                  ),
+                ),
+              ],
+              if (topic.note.trim().isNotEmpty) ...[
                 const SizedBox(height: 24),
                 const Text(
                   'メモ',
@@ -155,25 +189,31 @@ class TopicDetailScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  topic.description,
+                  topic.note,
                   style: const TextStyle(height: 1.65, fontSize: 16),
                 ),
               ],
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: archived ? null : () => _toggle(context, topic.id),
-                  icon: Icon(favorite ? Icons.favorite : Icons.favorite_border),
-                  label: Text(favorite ? 'お気に入りから解除' : 'お気に入りに追加'),
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(54),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(17),
+              if (topic.scope == TopicScope.global) ...[
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: archived
+                        ? null
+                        : () => _toggle(context, topic.id),
+                    icon: Icon(
+                      favorite ? Icons.favorite : Icons.favorite_border,
+                    ),
+                    label: Text(favorite ? 'お気に入りから解除' : 'お気に入りに追加'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(54),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(17),
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ],
             ],
           ),
         ),

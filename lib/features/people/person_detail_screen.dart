@@ -3,9 +3,13 @@ import 'package:flutter/material.dart';
 import '../../app/app_theme.dart';
 import '../../models/person.dart';
 import '../../models/person_topic.dart';
+import '../../models/topic.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/initial_avatar.dart';
 import '../../state/wadee_controller.dart';
+import '../ai/ai_suggestion_screen.dart';
+import '../ai/local_ai_service.dart';
+import '../ai/local_model_manager.dart';
 import '../topics/topic_actions.dart';
 import 'person_form_screen.dart';
 import 'person_topic_detail_screen.dart';
@@ -15,11 +19,15 @@ class PersonDetailScreen extends StatelessWidget {
   const PersonDetailScreen({
     required this.store,
     required this.personId,
+    this.modelManager,
+    this.aiServiceFactory,
     super.key,
   });
 
   final WadeeController store;
   final String personId;
+  final LocalModelManager? modelManager;
+  final LocalAIService Function(String modelPath)? aiServiceFactory;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -59,14 +67,17 @@ class PersonDetailScreen extends StatelessWidget {
         ),
         body: assigned.isEmpty
             ? _EmptyPersonTopicsBody(
+                store: store,
                 person: person,
                 onAddTopic: () => _pickTopic(context, person.id),
+                onSuggestTopics: () => _openAiSuggestions(context, person),
               )
             : _PersonTopicsBody(
                 store: store,
                 person: person,
                 assigned: assigned,
                 onAddTopic: () => _pickTopic(context, person.id),
+                onSuggestTopics: () => _openAiSuggestions(context, person),
               ),
       );
     },
@@ -85,6 +96,23 @@ class PersonDetailScreen extends StatelessWidget {
           builder: (_) => TopicPickerScreen(store: store, personId: id),
         ),
       );
+
+  Future<void> _openAiSuggestions(BuildContext context, Person person) {
+    final suppliedManager = modelManager;
+    return Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => AiSuggestionScreen(
+          store: store,
+          person: person,
+          modelManager: suppliedManager ?? LocalModelManager(),
+          disposeModelManager: suppliedManager == null,
+          serviceFactory:
+              aiServiceFactory ??
+              (modelPath) => LlamaLocalAIService(modelPath: modelPath),
+        ),
+      ),
+    );
+  }
 
   Future<void> _delete(BuildContext context, Person person) async {
     final confirmed = await showDialog<bool>(
@@ -117,18 +145,24 @@ class PersonDetailScreen extends StatelessWidget {
 
 class _EmptyPersonTopicsBody extends StatelessWidget {
   const _EmptyPersonTopicsBody({
+    required this.store,
     required this.person,
     required this.onAddTopic,
+    required this.onSuggestTopics,
   });
 
+  final WadeeController store;
   final Person person;
   final VoidCallback onAddTopic;
+  final VoidCallback onSuggestTopics;
 
   @override
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
     children: [
-      _PersonProfileCard(person: person),
+      _PersonProfileCard(store: store, person: person),
+      const SizedBox(height: 12),
+      _AiSuggestionButton(onPressed: onSuggestTopics),
       const SizedBox(height: 24),
       _TopicsHeading(count: 0),
       const SizedBox(height: 8),
@@ -161,12 +195,14 @@ class _PersonTopicsBody extends StatelessWidget {
     required this.person,
     required this.assigned,
     required this.onAddTopic,
+    required this.onSuggestTopics,
   });
 
   final WadeeController store;
   final Person person;
   final List<PersonTopic> assigned;
   final VoidCallback onAddTopic;
+  final VoidCallback onSuggestTopics;
 
   @override
   Widget build(BuildContext context) {
@@ -193,7 +229,11 @@ class _PersonTopicsBody extends StatelessWidget {
                 children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                    child: _PersonProfileCard(person: person),
+                    child: _PersonProfileCard(store: store, person: person),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                    child: _AiSuggestionButton(onPressed: onSuggestTopics),
                   ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
@@ -241,39 +281,99 @@ class _PersonTopicsBody extends StatelessWidget {
 }
 
 class _PersonProfileCard extends StatelessWidget {
-  const _PersonProfileCard({required this.person});
+  const _PersonProfileCard({required this.store, required this.person});
 
+  final WadeeController store;
   final Person person;
 
   @override
   Widget build(BuildContext context) => Card(
     child: Padding(
       padding: const EdgeInsets.all(16),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InitialAvatar(displayName: person.displayName, radius: 28),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              InitialAvatar(displayName: person.displayName, radius: 28),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
                   person.displayName,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                const SizedBox(height: 8),
-                Text('相手全般のメモ', style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 4),
-                Text(
-                  person.note.trim().isEmpty ? '全般メモはありません。' : person.note,
-                  style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (person.profile.isEmpty) ...[
+            const Text('プロフィールを追加すると、AIの提案がより相手に合いやすくなります。'),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (_) => PersonFormScreen(
+                    store: store,
+                    person: person,
+                    initiallyExpandProfile: true,
+                  ),
                 ),
-              ],
+              ),
+              icon: const Icon(Icons.person_add_alt_1_outlined),
+              label: const Text('プロフィールを追加'),
             ),
+          ] else ...[
+            Text('プロフィール', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 8),
+            ...person.profile.orderedEntries.map(
+              (entry) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _ProfileEntry(label: entry.key, value: entry.value),
+              ),
+            ),
+          ],
+          const SizedBox(height: 6),
+          Text('全般メモ', style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 4),
+          Text(
+            person.note.trim().isEmpty ? '全般メモはありません。' : person.note,
+            style: Theme.of(context).textTheme.bodyMedium,
           ),
         ],
       ),
+    ),
+  );
+}
+
+class _ProfileEntry extends StatelessWidget {
+  const _ProfileEntry({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: Theme.of(context).textTheme.labelMedium),
+      const SizedBox(height: 2),
+      Text(value, style: Theme.of(context).textTheme.bodyMedium),
+    ],
+  );
+}
+
+class _AiSuggestionButton extends StatelessWidget {
+  const _AiSuggestionButton({required this.onPressed});
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: double.infinity,
+    child: FilledButton.icon(
+      onPressed: onPressed,
+      icon: const Icon(Icons.auto_awesome),
+      label: const Text('AIで話題を提案'),
     ),
   );
 }
@@ -463,13 +563,25 @@ class _PersonTopicCard extends StatelessWidget {
                     const Icon(Icons.chevron_right),
                   ],
                 ),
-                if (topic.description.trim().isNotEmpty) ...[
+                if (topic.openingQuestion.trim().isNotEmpty) ...[
                   const SizedBox(height: 4),
-                  Text(
-                    topic.description,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  Text(topic.openingQuestion),
+                ],
+                if (topic.talkingPoints.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  ...topic.talkingPoints
+                      .take(2)
+                      .map(
+                        (point) => Padding(
+                          padding: const EdgeInsets.only(bottom: 2),
+                          child: Text('・$point'),
+                        ),
+                      ),
+                  if (topic.talkingPoints.length > 2)
+                    Text(
+                      'ほか ${topic.talkingPoints.length - 2}件',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                 ],
                 Wrap(
                   spacing: 6,
@@ -491,6 +603,16 @@ class _PersonTopicCard extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (topic.scope == TopicScope.person)
+                      Text(
+                        'この相手専用',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    if (topic.source == TopicSource.aiGenerated)
+                      Text(
+                        'AI提案',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     if (archived)
                       Text(
                         'アーカイブ済み',
